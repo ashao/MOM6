@@ -103,8 +103,9 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
   real :: x_dest ! Relative position of target interface
   real :: h_src_rem, h_dest_rem, dh ! Incremental thicknesses
   real :: uh_src_rem, uh_dest_rem, duh ! Incremental amounts of stuff
+  real :: c_uh_src, c_uh_dest ! Roundoff of source and destination
+
   integer :: k_src, k_dest ! Index of cell in src and dest columns
-  integer :: iter
   logical :: src_ran_out, src_exists
 
   uh_dest(:) = missing_value
@@ -122,6 +123,7 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
       k_src = k_src + 1
       h_src_rem = h_src(k_src)
       uh_src_rem = uh_src(k_src)
+      c_uh_src = 0.
       if (h_src_rem==0.) cycle
       src_exists = .true. ! This stops us masking out the entire column
     endif
@@ -130,6 +132,7 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
       k_dest = k_dest + 1
       h_dest_rem = h_dest(k_dest)
       uh_dest(k_dest) = 0.
+      c_uh_dest = 0.
       if (h_dest_rem==0.) cycle
     endif
     if (k_src==nsrc .and. h_src_rem==0.) then
@@ -151,6 +154,7 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
       duh = (dh / h_src_rem) * uh_src_rem
       h_src_rem = max(0., h_src_rem - dh)
       uh_src_rem = uh_src_rem - duh
+!      call comp_sum(uh_src_rem, c_uh_src - duh, c_uh_src)
       h_dest_rem = 0.
     else ! h_src_rem==h_dest_rem
       ! The source cell exactly fits the destination cell
@@ -159,13 +163,28 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
       uh_src_rem = 0.
       h_dest_rem = 0.
     endif
-    uh_dest(k_dest) = uh_dest(k_dest) + duh
+    call comp_sum(uh_dest(k_dest), c_uh_dest + duh, c_uh_dest)
     if (k_dest==ndest .and. (k_src==nsrc .or. h_dest_rem==0.)) exit
   enddo
 
   if (.not. src_exists) uh_dest(1:ndest) = missing_value
 
 end subroutine reintegrate_column
+
+!> Given a running sum and a summand, return both the naive sum and the residual due to roundoff
+!! This follows the method of Kahan (1965)
+subroutine comp_sum(sum,b,comp)
+  real, intent(inout) :: sum  !< Running sum
+  real, intent(in   ) :: b    !< Number to be added to the sum
+  real, intent(  out) :: comp !< Roundoff
+  ! Local variable
+  real :: temp
+
+  temp = sum ! Store original sum
+  sum = sum + b ! Add summand
+  comp = b - (sum - temp) ! Calculate roundoff
+
+end subroutine comp_sum
 
 !> Returns true if any unit tests for module MOM_diag_vkernels fail
 logical function diag_vkernels_unit_tests()
