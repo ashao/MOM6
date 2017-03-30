@@ -153,8 +153,7 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
       dh = h_dest_rem
       duh = (dh / h_src_rem) * uh_src_rem
       h_src_rem = max(0., h_src_rem - dh)
-      uh_src_rem = uh_src_rem - duh
-!      call comp_sum(uh_src_rem, c_uh_src - duh, c_uh_src)
+      call comp_sum(uh_src_rem, c_uh_src - duh, c_uh_src)
       h_dest_rem = 0.
     else ! h_src_rem==h_dest_rem
       ! The source cell exactly fits the destination cell
