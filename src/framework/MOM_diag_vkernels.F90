@@ -4,6 +4,8 @@ module MOM_diag_vkernels
 
 ! This file is part of MOM6. See LICENSE.md for the license.
 
+use MOM_debugging, only : check_column_integrals
+
 implicit none ; private
 
 public diag_vkernels_unit_tests
@@ -103,10 +105,13 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
   real :: x_dest ! Relative position of target interface
   real :: h_src_rem, h_dest_rem, dh ! Incremental thicknesses
   real :: uh_src_rem, uh_dest_rem, duh ! Incremental amounts of stuff
-  real :: c_uh_src, c_uh_dest ! Roundoff of source and destination
+  real :: c_uh_src, c_uh_dest, c_uh_tot ! Roundoff of source and destination
 
   integer :: k_src, k_dest ! Index of cell in src and dest columns
   logical :: src_ran_out, src_exists
+
+  integer :: k_max_uh
+  real :: max_uh
 
   uh_dest(:) = missing_value
 
@@ -116,6 +121,10 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
   h_src_rem = 0.
   src_ran_out = .false.
   src_exists = .false.
+
+  c_uh_tot = 0.
+  max_uh = 0.
+  k_max_uh = 1
 
   do while(.true.)
     if (h_src_rem==0. .and. k_src<nsrc) then
@@ -129,9 +138,16 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
     endif
     if (h_dest_rem==0. .and. k_dest<ndest) then
       ! Sink has no capacity so move to the next destination cell
+      if ( k_dest>0 ) then
+        if (max_uh<abs(uh_dest(k_dest))) then
+          k_max_uh = k_dest
+          max_uh = abs(uh_dest(k_dest))
+        endif
+      endif
       k_dest = k_dest + 1
       h_dest_rem = h_dest(k_dest)
       uh_dest(k_dest) = 0.
+      c_uh_tot = c_uh_tot + c_uh_dest
       c_uh_dest = 0.
       if (h_dest_rem==0.) cycle
     endif
@@ -165,6 +181,12 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
     call comp_sum(uh_dest(k_dest), c_uh_dest + duh, c_uh_dest)
     if (k_dest==ndest .and. (k_src==nsrc .or. h_dest_rem==0.)) exit
   enddo
+
+  ! If the source and target columns are the same thickness, then put any difference
+  ! between the two columns in the cell with the largest amount of stuff
+  if ( (k_max_uh>0) .and. (.not. (check_column_integrals(nsrc, h_src, ndest, h_dest))) ) then
+    uh_dest(k_max_uh) = uh_dest(k_max_uh) + (SUM(uh_src) - SUM(uh_dest))
+  endif
 
   if (.not. src_exists) uh_dest(1:ndest) = missing_value
 
