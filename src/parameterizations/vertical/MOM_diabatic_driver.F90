@@ -231,14 +231,13 @@ contains
 
 !>  This subroutine imposes the diapycnal mass fluxes and the
 !!  accompanying diapycnal advection of momentum and tracers.
-subroutine diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, G, GV, CS)
+subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
   type(ocean_grid_type),                     intent(inout) :: G      !< ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV     !< ocean vertical grid structure
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(inout) :: u      !< zonal velocity (m/s)
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(inout) :: v      !< meridional velocity (m/s)
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(inout) :: h      !< thickness (m for Bouss / kg/m2 for non-Bouss)
   type(thermo_var_ptrs),                     intent(inout) :: tv     !< points to thermodynamic fields; unused have NULL ptrs
-  real, dimension(:,:),                      pointer       :: Hml    !< active mixed layer depth
   type(forcing),                             intent(inout) :: fluxes !< points to forcing fields; unused fields have NULL ptrs
   type(vertvisc_type),                       intent(inout) :: visc   !< vertical viscosities, BBL properies, and related
   type(accel_diag_ptrs),                     intent(inout) :: ADp    !< points to accelerations in momentum equations,
@@ -769,7 +768,6 @@ subroutine diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, G, GV, CS)
       if (associated(visc%MLD)) then
         call energetic_PBL_get_MLD(CS%energetic_PBL_CSp, visc%MLD, G)
         call pass_var(visc%MLD, G%domain)
-        if (associated(Hml)) Hml(:,:) = visc%MLD(:,:)
       endif
 
       ! Augment the diffusivities due to those diagnosed in energetic_PBL.
@@ -1154,12 +1152,12 @@ subroutine diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, G, GV, CS)
     if (CS%useALEalgorithm) then
     ! For passive tracers, the changes in thickness due to boundary fluxes has yet to be applied
     ! so hold should be h_orig
-      call call_tracer_column_fns(h_prebound, h, ea, eb, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(h_prebound, h, ea, eb, fluxes, dt, visc%MLD, G, GV, tv, &
                                 CS%optics, CS%tracer_flow_CSp, CS%debug, &
-                                evap_CFL_limit = CS%evap_CFL_limit, &
-                                minimum_forcing_depth = CS%minimum_forcing_depth)
+                                evap_CFL_limit = CS%diabatic_aux_CSp%evap_CFL_limit, &
+                                minimum_forcing_depth = CS%diabatic_aux_CSp%minimum_forcing_depth)
     else
-      call call_tracer_column_fns(hold, h, eatr, ebtr, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(hold, h, eatr, ebtr, fluxes, dt, visc%MLD, G, GV, tv, &
                                 CS%optics, CS%tracer_flow_CSp, CS%debug)
     endif
 
@@ -1185,24 +1183,24 @@ subroutine diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, G, GV, CS)
 
     if (CS%useALEalgorithm) then
     ! For passive tracers, the changes in thickness due to boundary fluxes has yet to be applied
-      call call_tracer_column_fns(h_prebound, h, eatr, ebtr, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(h_prebound, h, eatr, ebtr, fluxes, dt, visc%MLD, G, GV, tv, &
                                   CS%optics, CS%tracer_flow_CSp, CS%debug,&
-                                  evap_CFL_limit = CS%evap_CFL_limit, &
-                                  minimum_forcing_depth = CS%minimum_forcing_depth)
+                                  evap_CFL_limit = CS%diabatic_aux_CSp%evap_CFL_limit, &
+                                  minimum_forcing_depth = CS%diabatic_aux_CSp%minimum_forcing_depth)
     else
-      call call_tracer_column_fns(hold, h, eatr, ebtr, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(hold, h, eatr, ebtr, fluxes, dt, visc%MLD, G, GV, tv, &
                                   CS%optics, CS%tracer_flow_CSp, CS%debug)
     endif
 
   else
     if (CS%useALEalgorithm) then
     ! For passive tracers, the changes in thickness due to boundary fluxes has yet to be applied
-      call call_tracer_column_fns(h_prebound, h, eatr, ebtr, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(h_prebound, h, eatr, ebtr, fluxes, dt, visc%MLD, G, GV, tv, &
                                   CS%optics, CS%tracer_flow_CSp, CS%debug, &
-                                  evap_CFL_limit = CS%evap_CFL_limit, &
-                                  minimum_forcing_depth = CS%minimum_forcing_depth)
+                                  evap_CFL_limit = CS%diabatic_aux_CSp%evap_CFL_limit, &
+                                  minimum_forcing_depth = CS%diabatic_aux_CSp%minimum_forcing_depth)
     else
-      call call_tracer_column_fns(hold, h, ea, eb, fluxes, dt, G, GV, tv, &
+      call call_tracer_column_fns(hold, h, ea, eb, fluxes, dt, visc%MLD, G, GV, tv, &
                                   CS%optics, CS%tracer_flow_CSp, CS%debug)
     endif
 
@@ -1478,34 +1476,15 @@ subroutine diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, G, GV, CS)
 
 end subroutine diabatic
 
-!> Returns pointers or values of members within the diabatic_CS type. For extensibility,
-!! each returned argument is an optional argument
-subroutine extract_diabatic_member(CS, opacity_CSp, optics_CSp, &
-                                   evap_CFL_limit, minimum_forcing_depth)
-  type(diabatic_CS),  intent(in   ) :: CS
-  ! All output arguments are optional
-  type(opacity_CS),   pointer, optional, intent(  out) :: opacity_CSp
-  type(optics_type),  pointer, optional, intent(  out) :: optics_CSp
-  real,                        optional, intent(  out) :: evap_CFL_limit
-  real,                        optional, intent(  out) :: minimum_forcing_depth
-
-  ! Pointers to control structures
-  if (present(opacity_CSp)) opacity_CSp => CS%opacity_CSp
-  if (present(optics_CSp))  optics_CSp  => CS%optics
-
-  ! Constants within diabatic_CS
-  if (present(evap_CFL_limit))        evap_CFL_limit = CS%evap_CFL_limit
-  if (present(minimum_forcing_depth)) minimum_forcing_depth = CS%minimum_forcing_depth
-
-end subroutine
 
 !> Routine called for adiabatic physics
-subroutine adiabatic(h, tv, fluxes, dt, G, GV, CS)
+subroutine adiabatic(h, tv, fluxes, dt, MLD, G, GV, CS)
   type(ocean_grid_type),                    intent(inout) :: G      !< ocean grid structure
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)), intent(inout) :: h      !< thickness (m for Bouss or kg/m2 for non-Bouss)
   type(thermo_var_ptrs),                    intent(inout) :: tv     !< points to thermodynamic fields
   type(forcing),                            intent(inout) :: fluxes !< boundary fluxes
   real,                                     intent(in)    :: dt     !< time step (seconds)
+  real, dimension(:,:),                     pointer       :: MLD    !< Mixed layer depth provided by PBL (H units)
   type(verticalGrid_type),                  intent(in)    :: GV     !< ocean vertical grid structure
   type(diabatic_CS),                        pointer       :: CS     !< module control structure
 
@@ -1513,7 +1492,7 @@ subroutine adiabatic(h, tv, fluxes, dt, G, GV, CS)
 
   zeros(:,:,:) = 0.0
 
-  call call_tracer_column_fns(h, h, zeros, zeros, fluxes, dt, G, GV, tv, &
+  call call_tracer_column_fns(h, h, zeros, zeros, fluxes, dt, MLD, G, GV, tv, &
                               CS%optics, CS%tracer_flow_CSp, CS%debug)
 
 end subroutine adiabatic
