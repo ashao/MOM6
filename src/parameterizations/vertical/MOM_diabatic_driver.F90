@@ -5,7 +5,7 @@ module MOM_diabatic_driver
 
 
 use MOM_bulk_mixed_layer,    only : bulkmixedlayer, bulkmixedlayer_init, bulkmixedlayer_CS
-use MOM_debugging,           only : hchksum
+use MOM_checksums,           only : hchksum, uchksum, vchksum
 use MOM_checksum_packages,   only : MOM_state_chksum, MOM_state_stats
 use MOM_cpu_clock,           only : cpu_clock_id, cpu_clock_begin, cpu_clock_end
 use MOM_cpu_clock,           only : CLOCK_MODULE_DRIVER, CLOCK_MODULE, CLOCK_ROUTINE
@@ -70,12 +70,11 @@ implicit none ; private
 public diabatic
 public diabatic_driver_init
 public diabatic_driver_end
-public extract_diabatic_member
 public adiabatic
 public adiabatic_driver_init
 
 !> Control structure for this module
-type, public:: diabatic_CS ; private
+type, public :: diabatic_CS ;
   logical :: bulkmixedlayer          !< If true, a refined bulk mixed layer is used with
                                      !! nkml sublayers (and additional buffer layers).
   logical :: use_energetic_PBL       !< If true, use the implicit energetics planetary
@@ -136,10 +135,6 @@ type, public:: diabatic_CS ; private
   real    :: Kd_min_tr               !< A minimal diffusivity that should always be
                                      !! applied to tracers, especially in massless layers
                                      !! near the bottom, in m2 s-1.
-  real    :: minimum_forcing_depth = 0.001 !< The smallest depth over which heat and freshwater
-                                           !! fluxes is applied, in m.
-  real    :: evap_CFL_limit = 0.8    !< The largest fraction of a layer that can be
-                                     !! evaporated in one time-step (non-dim).
 
   logical :: useKPP                  !< use CVmix/KPP diffusivities and non-local transport
   logical :: salt_reject_below_ML    !< If true, add salt below mixed layer (layer mode only)
@@ -452,7 +447,7 @@ subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
         ! Changes: h, tv%T, tv%S, eaml and ebml  (G is also inout???)
         call bulkmixedlayer(h, u_h, v_h, tv, fluxes, dt*CS%ML_mix_first, &
                             eaml,ebml, G, GV, CS%bulkmixedlayer_CSp, CS%optics, &
-                            Hml, CS%aggregate_FW_forcing, dt, last_call=.false.)
+                            CS%aggregate_FW_forcing, dt, last_call=.false.)
         if (CS%salt_reject_below_ML) &
           call insert_brine(h, tv, G, GV, fluxes, nkmb, CS%diabatic_aux_CSp, &
                             dt*CS%ML_mix_first, CS%id_brine_lay)
@@ -460,7 +455,7 @@ subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
         ! Changes: h, tv%T, tv%S, eaml and ebml  (G is also inout???)
         call bulkmixedlayer(h, u_h, v_h, tv, fluxes, dt, eaml, ebml, &
                         G, GV, CS%bulkmixedlayer_CSp, CS%optics, &
-                        Hml, CS%aggregate_FW_forcing, dt, last_call=.true.)
+                        CS%aggregate_FW_forcing, dt, last_call=.true.)
       endif
 
       !  Keep salinity from falling below a small but positive threshold.
@@ -746,9 +741,7 @@ subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
     enddo ; enddo ; enddo
     if (CS%use_energetic_PBL) then
       call applyBoundaryFluxesInOut(CS%diabatic_aux_CSp, G, GV, dt, fluxes, CS%optics, &
-                          h, tv, CS%aggregate_FW_forcing, CS%evap_CFL_limit, &
-                          CS%minimum_forcing_depth, cTKE, dSV_dT, dSV_dS)
-
+                          h, tv, CS%aggregate_FW_forcing, cTKE, dSV_dT, dSV_dS)
       call calculateBuoyancyFlux2d(G, GV, fluxes, CS%optics, h, tv%T, tv%S, tv, &
            CS%KPP_buoy_flux, CS%KPP_temp_flux, CS%KPP_salt_flux)
 
@@ -800,8 +793,7 @@ subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
 
     else
       call applyBoundaryFluxesInOut(CS%diabatic_aux_CSp, G, GV, dt, fluxes, CS%optics, &
-                                    h, tv, CS%aggregate_FW_forcing, &
-                                    CS%evap_CFL_limit, CS%minimum_forcing_depth)
+                                    h, tv, CS%aggregate_FW_forcing)
 
     endif   ! endif for CS%use_energetic_PBL
 
@@ -986,7 +978,7 @@ subroutine diabatic(u, v, h, tv, fluxes, visc, ADp, CDp, dt, G, GV, CS)
       ! Changes: h, tv%T, tv%S, ea and eb  (G is also inout???)
       call bulkmixedlayer(h, u_h, v_h, tv, fluxes, dt_mix, ea, eb, &
                       G, GV, CS%bulkmixedlayer_CSp, CS%optics, &
-                      Hml, CS%aggregate_FW_forcing, dt, last_call=.true.)
+                      CS%aggregate_FW_forcing, dt, last_call=.true.)
 
       if (CS%salt_reject_below_ML) &
         call insert_brine(h, tv, G, GV, fluxes, nkmb, CS%diabatic_aux_CSp, dt_mix, &
@@ -1931,18 +1923,6 @@ subroutine diabatic_driver_init(Time, G, GV, param_file, useALEalgorithm, diag, 
   call get_param(param_file, mod, "TRACER_TRIDIAG", CS%tracer_tridiag, &
                  "If true, use the passive tracer tridiagonal solver for T and S\n", &
                  default=.false.)
-
-  call get_param(param_file, mod, "MINIMUM_FORCING_DEPTH", CS%minimum_forcing_depth, &
-                 "The smallest depth over which forcing can be applied. This\n"//&
-                 "only takes effect when near-surface layers become thin\n"//&
-                 "relative to this scale, in which case the forcing tendencies\n"//&
-                 "scaled down by distributing the forcing over this depth scale.", &
-                 units="m", default=0.001)
-  call get_param(param_file, mod, "EVAP_CFL_LIMIT", CS%evap_CFL_limit, &
-                 "The largest fraction of a layer than can be lost to forcing\n"//&
-                 "(e.g. evaporation, sea-ice formation) in one time-step. The unused\n"//&
-                 "mass loss is passed down through the column.", &
-                 units="nondim", default=0.8)
 
 
   ! Register all available diagnostics for this module.

@@ -106,7 +106,6 @@ module MOM_generic_tracer
      !   The following pointer will be directed to the first element of the
      ! linked list of generic diagnostics fields that must be Z registered by MOM.
      type(g_diag_type), pointer :: g_diag_list => NULL()
-
      integer :: H_to_m !Auxiliary to access GV%H_to_m in routines that do not have access to GV
 
   end type MOM_generic_tracer_CS
@@ -513,13 +512,14 @@ contains
   !  </TEMPLATE>
   ! </SUBROUTINE>
 
-  subroutine MOM_generic_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, CS, tv, optics, &
+  subroutine MOM_generic_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, MLD, G, GV, CS, tv, optics, &
         evap_CFL_limit, minimum_forcing_depth)
     type(ocean_grid_type),                 intent(in) :: G
     type(verticalGrid_type),               intent(in) :: GV
     real, dimension(SZI_(G),SZJ_(G),SZK_(G)), intent(in) :: h_old, h_new, ea, eb
     type(forcing),                         intent(in) :: fluxes
     real,                                  intent(in) :: dt
+    real, dimension(:,:),                  pointer    :: MLD    !< Mixed layer depth provided by PBL (H units)
     type(MOM_generic_tracer_CS),           pointer    :: CS
     type(thermo_var_ptrs),                 intent(in) :: tv
     type(optics_type),                     intent(in) :: optics
@@ -640,7 +640,7 @@ contains
     !Calculate tendencies (i.e., field changes at dt) from the sources / sinks
     !
 
-    call generic_tracer_source(tv%T,tv%S,rho_dzt,dzt,hblt_depth,G%isd,G%jsd,1,dt,&
+    call generic_tracer_source(tv%T,tv%S,rho_dzt,dzt,MLD,G%isd,G%jsd,1,dt,&
          G%areaT,get_diag_time_end(CS%diag),&
          optics%nbands, optics%max_wavelength_band, optics%sw_pen_band, optics%opacity_band, sosga=sosga)
 
