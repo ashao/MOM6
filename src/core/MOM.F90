@@ -752,8 +752,7 @@ subroutine step_MOM(fluxes, state, Time_start, time_interval, CS)
         ! The routine 'ALE_main' can be found in 'MOM_ALE.F90'.
         if ( CS%use_ALE_algorithm) then
           call do_group_pass(CS%pass_T_S_h, G%Domain)
-          CS%dt_ALE = CS%dt_ALE + dtdia
-          if (MOD(CS%dt_ALE,CS%ALE_period)==0.) then
+          if (CS%dt_ALE==CS%ALE_period) then
   !         call pass_vector(u, v, G%Domain)
             ! update squared quantities
             if (associated(CS%S_squared)) &
@@ -779,6 +778,7 @@ subroutine step_MOM(fluxes, state, Time_start, time_interval, CS)
             call cpu_clock_end(id_clock_ALE)
             CS%dt_ALE = 0.
           endif
+          CS%dt_ALE = CS%dt_ALE + dtdia
         endif   ! endif for the block "if ( CS%use_ALE_algorithm )"
 
         call cpu_clock_begin(id_clock_pass)
