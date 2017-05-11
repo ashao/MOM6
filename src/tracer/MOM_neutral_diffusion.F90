@@ -49,6 +49,7 @@ type, public :: neutral_diffusion_CS ; private
   integer, allocatable, dimension(:) :: id_neutral_diff_tracer_trans_y_2d   ! k-summed ndiff merid tracer transport
 
   real    :: C_p ! heat capacity of seawater (J kg-1 K-1)
+  real    :: ndiff_p_ref ! Reference pressure used to calculate density. Negative values use local pressure
 
 end type neutral_diffusion_CS
 
@@ -86,12 +87,18 @@ logical function neutral_diffusion_init(Time, G, param_file, diag, CS)
   if (.not.neutral_diffusion_init) then
     return
   endif
-
   allocate(CS)
   CS%diag => diag
 
+! Read all relevant parameters and write them to the model log.
+  call get_param(param_file, mod, "NDIFF_P_REF", CS%ndiff_p_ref, &
+                 "If negative (default), then diffusion occurs along\n"//   &
+                 "isoneutral surfaces. If positive, then the specified\n"// &
+                 "value is the reference pressure used to calculate\n"//    &
+                 "the isopycnal directions. Units are Pa\n", &
+                 units = "Pa", default = -1.)
 
-  ! Read all relevant parameters and write them to the model log.
+
 ! call openParameterBlock(param_file,'NEUTRAL_DIFF')
 ! call get_param(param_file, mod, "KHTR", CS%KhTr, &
 !                "The background along-isopycnal tracer diffusivity.", &
@@ -268,6 +275,10 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, EOS, CS)
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: Pint ! Interface pressure (Pa)
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: dRdT ! Interface thermal expansion coefficient (kg/m3/degC)
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)+1) :: dRdS ! Interface haline expansion coefficient (kg/m3/ppt)
+  real, dimension(SZI_(G))                   :: Pvec ! Vector of pressure along the i-direction
+
+  ! If ndiff_p_ref is positive, then epipycnal directions are calculated
+  if (CS%ndiff_p_ref >= 0.) Pvec(:) = CS%ndiff_p_ref
 
   do j = G%jsc-1, G%jec+1
     ! Interpolate state to interface
@@ -279,7 +290,9 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, EOS, CS)
     ! Calculate interface properties
     Pint(:,j,1) = 0. ! Assume P=0 (Pa) at surface - needs correcting for atmospheric and ice loading - AJA
     do k = 1, G%ke+1
-      call calculate_density_derivs(Tint(:,j,k), Sint(:,j,k), Pint(:,j,k), &
+      ! If ref_pres is negative, local pressure will be used and epineutral direction calculated
+      if (CS%ndiff_p_ref < 0.) Pvec(:) = Pint(:,j,k)
+      call calculate_density_derivs(Tint(:,j,k), Sint(:,j,k), Pvec(:), &
                                     dRdT(:,j,k), dRdS(:,j,k), G%isc-1, G%iec-G%isc+3, EOS)
       if (k<=G%ke) Pint(:,j,k+1) = Pint(:,j,k) + h(:,j,k) * GV%H_to_Pa ! Pressure at next interface, k+1 (Pa)
     enddo
