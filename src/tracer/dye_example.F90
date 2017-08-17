@@ -99,7 +99,9 @@ type, public :: dye_tracer_CS ; private
                                      dye_source_minlat, & ! Minimum latitude of region dye will be injected.
                                      dye_source_maxlat, & ! Maximum latitude of region dye will be injected.
                                      dye_source_mindepth, & ! Minimum depth of region dye will be injected (m).
-                                     dye_source_maxdepth  ! Maximum depth of region dye will be injected (m).
+                                     dye_source_maxdepth, &  ! Maximum depth of region dye will be injected (m).
+                                     dye_source_mintime, &    ! The first year in which region dye will be injected (s).
+                                     dye_source_maxtime      ! The last year in which region dye will be injected (s).
   type(tracer_registry_type), pointer :: tr_Reg => NULL()
   real, pointer :: tr(:,:,:,:) => NULL()   ! The array of tracers used in this
                                            ! subroutine, in g m-3?
@@ -115,6 +117,7 @@ type, public :: dye_tracer_CS ; private
     id_tracer, id_tr_adx, id_tr_ady, &
     id_tr_dfx, id_tr_dfy
 
+  type(time_type), pointer :: Time ! A pointer to the ocean model's clock.
   type(diag_ctrl), pointer :: diag ! A structure that is used to regulate the
                              ! timing of diagnostic output.
   type(MOM_restart_CS), pointer :: restart_CSp => NULL()
@@ -172,7 +175,10 @@ function register_dye_tracer(HI, GV, param_file, CS, tr_Reg, restart_CS)
            CS%dye_source_minlat(CS%ntr), &
            CS%dye_source_maxlat(CS%ntr), &
            CS%dye_source_mindepth(CS%ntr), &
-           CS%dye_source_maxdepth(CS%ntr))
+           CS%dye_source_maxdepth(CS%ntr), &
+           CS%dye_source_mintime(CS%ntr), &
+           CS%dye_source_maxtime(CS%ntr), &
+           )
   allocate(CS%tr_adx(CS%ntr), &
            CS%tr_ady(CS%ntr), &
            CS%tr_dfx(CS%ntr), &
@@ -232,6 +238,17 @@ function register_dye_tracer(HI, GV, param_file, CS, tr_Reg, restart_CS)
                  fail_if_missing=.true.)
   if (minval(CS%dye_source_maxdepth(:)) < -1.e29) &
     call MOM_error(FATAL, "register_dye_tracer: Not enough values provided for DYE_SOURCE_MAXDEPTH ")
+  CS%dye_source_maxtime(:) = -1.e30
+  call get_param(param_file, mdl, "DYE_SOURCE_MAXTIME", CS%dye_source_maxtime, &
+                 "This is the maximum depth at which we inject dyes.", &
+                 fail_if_missing=.true.)
+  if (minval(CS%dye_source_maxtime(:)) < -1.e29) &
+    call MOM_error(FATAL, "register_dye_tracer: Not enough values provided for DYE_SOURCE_MAXTIME ")
+  call get_param(param_file, mdl, "DYE_SOURCE_MINTIME", CS%dye_source_mintime, &
+                 "This is the maximum depth at which we inject dyes.", &
+                 fail_if_missing=.true.)
+  if (minval(CS%dye_source_mintime(:)) < -1.e29) &
+    call MOM_error(FATAL, "register_dye_tracer: Not enough values provided for DYE_SOURCE_MINTIME ")
 
   do m = 1, CS%ntr
     write(var_name(:),'(A,I3.3)') "dye",m
@@ -310,6 +327,7 @@ subroutine initialize_dye_tracer(restart, day, G, GV, h, diag, OBC, CS, sponge_C
   if (.not.associated(CS)) return
   if (CS%ntr < 1) return
 
+  CS%Time => day
   CS%diag => diag
 
   ! Establish location of source
@@ -429,25 +447,30 @@ subroutine dye_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, CS
     enddo
   endif
 
+  call get_time(CS%Time, secs, days)
+  year = (86400.0*days + real(secs)) * Isecs_per_year
+
   do m=1,CS%ntr
-    do j=G%jsd,G%jed ; do i=G%isd,G%ied
-      ! A dye is set dependent on the center of the cell being inside the rectangular box.
-      if (CS%dye_source_minlon(m)<G%geoLonT(i,j) .and. &
-          CS%dye_source_maxlon(m)>=G%geoLonT(i,j) .and. &
-          CS%dye_source_minlat(m)<G%geoLatT(i,j) .and. &
-          CS%dye_source_maxlat(m)>=G%geoLatT(i,j) .and. &
-          G%mask2dT(i,j) > 0.0 ) then
-        z_bot = -G%bathyT(i,j)
-        do k=nz,1,-1
-          z_center = z_bot + 0.5*h_new(i,j,k)*GV%H_to_m
-          if ( z_center > -CS%dye_source_maxdepth(m) .and. &
-               z_center < -CS%dye_source_mindepth(m) ) then
-            CS%tr(i,j,k,m) = 1.0
-          endif
-          z_bot = z_bot + h_new(i,j,k)*GV%H_to_m
-        enddo
-      endif
-    enddo; enddo
+    if ( (year > CS%dye_source_mintime(m)) .and. (year < CS%dye_source_maxtime(m)) ) then
+      do j=G%jsd,G%jed ; do i=G%isd,G%ied
+        ! A dye is set dependent on the center of the cell being inside the rectangular box.
+        if (CS%dye_source_minlon(m)<G%geoLonT(i,j) .and. &
+            CS%dye_source_maxlon(m)>=G%geoLonT(i,j) .and. &
+            CS%dye_source_minlat(m)<G%geoLatT(i,j) .and. &
+            CS%dye_source_maxlat(m)>=G%geoLatT(i,j) .and. &
+            G%mask2dT(i,j) > 0.0 ) then
+          z_bot = -G%bathyT(i,j)
+          do k=nz,1,-1
+            z_center = z_bot + 0.5*h_new(i,j,k)*GV%H_to_m
+            if ( z_center > -CS%dye_source_maxdepth(m) .and. &
+                 z_center < -CS%dye_source_mindepth(m) ) then
+              CS%tr(i,j,k,m) = 1.0
+            endif
+            z_bot = z_bot + h_new(i,j,k)*GV%H_to_m
+          enddo
+        endif
+      enddo; enddo
+    endif
   enddo
 
 
