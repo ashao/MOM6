@@ -95,6 +95,7 @@ type, public :: offline_transport_CS ; private
   !! Variables controlling some of the numerical considerations of offline transport
   integer :: num_off_iter   !< Number of advection iterations per offline step
   integer :: num_vert_iter  !< Number of vertical iterations per offline step
+  integer :: num_lin_iter   !< Number of linearly limited advection iterations per offline step
   integer :: off_ale_mod    !< Sets how frequently the ALE step is done during the advection
   real :: dt_offline ! Timestep used for offline tracers
   real :: dt_offline_vertical ! Timestep used for calls to tracer vertical physics
@@ -194,9 +195,9 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
   type(verticalGrid_type),    pointer :: GV => NULL() ! Pointer to structure containing information
                                                       ! about the vertical grid
   ! Work arrays for mass transports
-  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G))   :: uhtr_sub
+  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G))   :: uhtr_sub, uhtr_lin, uhtr_rem
   ! Meridional mass transports
-  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G))   :: vhtr_sub
+  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G))   :: vhtr_sub, vhtr_lin, vhtr_rem
 
   real :: prev_tot_residual, tot_residual  ! Used to keep track of how close to convergence we are
 
@@ -206,7 +207,7 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
       h_vol
   ! Fields for eta_diff diagnostic
   real, dimension(SZI_(CS%G),SZJ_(CS%G))         :: eta_pre, eta_end
-  integer                                        :: niter, iter
+  integer                                        :: niter, iter, lin_iter
   real                                           :: Inum_iter
   integer :: i, j, k, m, is, ie, js, je, isd, ied, jsd, jed, nz
   integer :: isv, iev, jsv, jev ! The valid range of the indices.
@@ -243,6 +244,10 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
   h_vol(:,:,:) = 0.0
   uhtr_sub(:,:,:) = 0.0
   vhtr_sub(:,:,:) = 0.0
+  uhtr_lin(:,:,:) = 0.
+  vhtr_lin(:,:,:) = 0.
+  uhtr_rem(:,:,:) = 0.
+  vhtr_rem(:,:,:) = 0.
 
   ! converged should only be true if there are no remaining mass fluxes
   converged = .false.
@@ -288,83 +293,103 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
     endif
   endif
 
-  ! This loop does essentially a flux-limited, nonlinear advection scheme until all mass fluxes
-  ! are used. ALE is done after the horizontal advection.
-  do iter=1,CS%num_off_iter
+  do k =1,nz ; do j=js-1,je ; do i=is-1,ie
+    uhtr_lin(i,j,k) = uhtr(i,j,k)/CS%num_lin_iter
+    vhtr_lin(i,j,k) = vhtr(i,j,k)/CS%num_lin_iter
+  enddo ; enddo ; enddo
 
-    do k=1,nz ; do j=js,je ; do i=is,ie
-      h_vol(i,j,k) = h_new(i,j,k)*G%areaT(i,j)
-      h_pre(i,j,k) = h_new(i,j,k)
+  do lin_iter = 1,CS%num_lin_iter
+    do k =1,nz ; do j=js-1,je ; do i=is-1,ie
+      uhtr_sub(i,j,k) = uhtr_lin(i,j,k)
+      vhtr_sub(i,j,k) = vhtr_lin(i,j,k)
     enddo ; enddo ; enddo
+    ! This loop does essentially a flux-limited, nonlinear advection scheme until all mass fluxes
+    ! are used. ALE is done after the horizontal advection.
+    do iter=1,CS%num_off_iter
 
-    if(CS%debug) then
-      call hchksum(h_vol,"h_vol before advect",G%HI)
-      call uvchksum("[uv]htr_sub before advect", uhtr_sub, vhtr_sub, G%HI)
-      write(debug_msg, '(A,I4.4)') 'Before advect ', iter
-      call MOM_tracer_chkinv(debug_msg, G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
-    endif
+      do k=1,nz ; do j=js,je ; do i=is,ie
+        h_vol(i,j,k) = h_new(i,j,k)*G%areaT(i,j)
+        h_pre(i,j,k) = h_new(i,j,k)
+      enddo ; enddo ; enddo
 
-    call advect_tracer(h_pre, uhtr_sub, vhtr_sub, CS%OBC, CS%dt_offline, G, GV, &
-        CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
-        uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
-
-    ! Switch the direction every iteration
-    x_before_y = .not. x_before_y
-
-    ! Update the new layer thicknesses after one round of advection has happened
-    do k=1,nz ; do j=js,je ; do i=is,ie
-      h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
-    enddo ; enddo ; enddo
-
-    if (MODULO(iter,CS%off_ale_mod)==0) then
-      ! Do ALE remapping/regridding to allow for more advection to occur in the next iteration
-      call pass_var(h_new,G%Domain)
-      if (CS%debug) then
-        call hchksum(h_new,"h_new before ALE",G%HI)
-        write(debug_msg, '(A,I4.4)') 'Before ALE ', iter
-        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+      if(CS%debug) then
+        call hchksum(h_vol,"h_vol before advect",G%HI)
+        call uvchksum("[uv]htr_sub before advect", uhtr_sub, vhtr_sub, G%HI)
+        write(debug_msg, '(A,I4.4)') 'Before advect ', iter
+        call MOM_tracer_chkinv(debug_msg, G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
       endif
-      call cpu_clock_begin(id_clock_ALE)
-      call ALE_main_offline(G, GV, h_new, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%dt_offline)
-      call cpu_clock_end(id_clock_ALE)
 
-      if (CS%debug) then
-        call hchksum(h_new,"h_new after ALE",G%HI)
-        write(debug_msg, '(A,I4.4)') 'After ALE ', iter
-        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+      call advect_tracer(h_pre, uhtr_sub, vhtr_sub, CS%OBC, CS%dt_offline, G, GV, &
+          CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
+          uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
+
+      ! Switch the direction every iteration
+      x_before_y = .not. x_before_y
+
+      ! Update the new layer thicknesses after one round of advection has happened
+      do k=1,nz ; do j=js,je ; do i=is,ie
+        h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
+      enddo ; enddo ; enddo
+
+      if (MODULO(iter,CS%off_ale_mod)==0) then
+        ! Do ALE remapping/regridding to allow for more advection to occur in the next iteration
+        call pass_var(h_new,G%Domain)
+        if (CS%debug) then
+          call hchksum(h_new,"h_new before ALE",G%HI)
+          write(debug_msg, '(A,I4.4)') 'Before ALE ', iter
+          call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+        endif
+        call cpu_clock_begin(id_clock_ALE)
+        call ALE_main_offline(G, GV, h_new, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%dt_offline)
+        call cpu_clock_end(id_clock_ALE)
+
+        if (CS%debug) then
+          call hchksum(h_new,"h_new after ALE",G%HI)
+          write(debug_msg, '(A,I4.4)') 'After ALE ', iter
+          call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+        endif
       endif
-    endif
 
+      do k=1,nz; do j=js,je ; do i=is,ie
+        uhtr_sub(I,j,k) = uhtr(I,j,k)
+        vhtr_sub(i,J,k) = vhtr(i,J,k)
+      enddo ; enddo ; enddo
+      call pass_var(h_new, G%Domain)
+      call pass_vector(uhtr_sub,vhtr_sub,G%Domain)
+
+      ! Check for whether we've used up all the advection, or if we need to move on because
+      ! advection has stalled
+      tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
+      if (CS%print_adv_offline) then
+        if (is_root_pe()) then
+          write(*,'(A,ES24.16)') "Main advection remaining transport: ", tot_residual
+        endif
+      endif
+      ! If all the mass transports have been used u, then quit
+      if (tot_residual == 0.0) then
+        if (is_root_pe()) write(0,*) "Converged after iteration", iter
+        converged = .true.
+        exit
+      endif
+      ! If advection has stalled or the remaining residual is less than a specified amount, quit
+      if ( (tot_residual == prev_tot_residual) .or. (tot_residual<CS%min_residual) ) then
+        converged = .false.
+        exit
+      endif
+
+      prev_tot_residual = tot_residual
+
+    enddo
     do k=1,nz; do j=js,je ; do i=is,ie
-      uhtr_sub(I,j,k) = uhtr(I,j,k)
-      vhtr_sub(i,J,k) = vhtr(i,J,k)
+      uhtr_rem(i,j,k) = uhtr_rem(i,j,k) + uhtr_sub(i,j,k)
+      vhtr_rem(i,j,k) = vhtr_rem(i,j,k) + vhtr_sub(i,j,k)
     enddo ; enddo ; enddo
-    call pass_var(h_new, G%Domain)
-    call pass_vector(uhtr_sub,vhtr_sub,G%Domain)
-
-    ! Check for whether we've used up all the advection, or if we need to move on because
-    ! advection has stalled
-    tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
-    if (CS%print_adv_offline) then
-      if (is_root_pe()) then
-        write(*,'(A,ES24.16)') "Main advection remaining transport: ", tot_residual
-      endif
-    endif
-    ! If all the mass transports have been used u, then quit
-    if (tot_residual == 0.0) then
-      if (is_root_pe()) write(0,*) "Converged after iteration", iter
-      converged = .true.
-      exit
-    endif
-    ! If advection has stalled or the remaining residual is less than a specified amount, quit
-    if ( (tot_residual == prev_tot_residual) .or. (tot_residual<CS%min_residual) ) then
-      converged = .false.
-      exit
-    endif
-
-    prev_tot_residual = tot_residual
-
   enddo
+
+  do k=1,nz; do j=js,je ; do i=is,ie
+    uhtr(i,j,k) = uhtr_rem(i,j,k)
+    vhtr(i,j,k) = vhtr_rem(i,j,k)
+  enddo ; enddo ; enddo
 
   ! Make sure that uhtr and vhtr halos are updated
   h_pre(:,:,:) = h_new(:,:,:)
@@ -1279,6 +1304,9 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
   call get_param(param_file, mdl, "NUM_OFF_ITER", CS%num_off_iter, &
     "Number of iterations to subdivide the offline tracer advection and diffusion", &
     default = 60)
+  call get_param(param_file, mdl, "NUM_LIN_ITER", CS%num_lin_iter, &
+    "Number of iterations to linearly limit the amount of transport per iteration", &
+    default = 5)
   call get_param(param_file, mdl, "OFF_ALE_MOD", CS%off_ale_mod, &
     "Sets how many horizontal advection steps are taken before an ALE\n" //&
     "remapping step is done. 1 would be x->y->ALE, 2 would be"           //&
