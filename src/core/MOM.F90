@@ -1395,7 +1395,7 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
     endif
     ! The functions related to column physics of tracers is performed separately in ALE mode
     if (do_vertical) then
-      call offline_diabatic_ale(fluxes, Time_start, Time_end, CS%offline_CSp, CS%h, eatr, ebtr)
+!      call offline_diabatic_ale(fluxes, Time_start, Time_end, CS%offline_CSp, CS%h, eatr, ebtr)
     endif
 
     ! Last thing that needs to be done is the final ALE remapping

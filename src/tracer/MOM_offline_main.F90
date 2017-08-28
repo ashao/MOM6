@@ -384,6 +384,8 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
       uhtr_rem(i,j,k) = uhtr_rem(i,j,k) + uhtr_sub(i,j,k)
       vhtr_rem(i,j,k) = vhtr_rem(i,j,k) + vhtr_sub(i,j,k)
     enddo ; enddo ; enddo
+
+    call offline_diabatic_ale(fluxes, (CS%dt_offline/CS%num_lin_iter), CS, h_new)
   enddo
 
   do k=1,nz; do j=js,je ; do i=is,ie
@@ -638,15 +640,12 @@ end function remaining_transport_sum
 !> The vertical/diabatic driver for offline tracers. First the eatr/ebtr associated with the interpolated
 !! vertical diffusivities are calculated and then any tracer column functions are done which can include
 !! vertical diffuvities and source/sink terms.
-subroutine offline_diabatic_ale(fluxes, Time_start, Time_end, CS, h_pre, eatr, ebtr)
+subroutine offline_diabatic_ale(fluxes, dt_vert, CS, h_pre)
 
   type(forcing),    intent(inout)      :: fluxes        !< pointers to forcing fields
-  type(time_type),  intent(in)         :: Time_start    !< starting time of a segment, as a time type
-  type(time_type),  intent(in)         :: Time_end      !< time interval
+  real,             intent(in)         :: dt_vert       !< starting time of a segment, as a time type
   type(offline_transport_CS), pointer  :: CS            !< control structure from initialize_MOM
   real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout) :: h_pre
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout) :: eatr !< Entrainment from layer above
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout) :: ebtr !< Entrainment from layer below
   real, dimension(SZI_(CS%G),SZJ_(CS%G))    :: sw, sw_vis, sw_nir !< Save old value of shortwave radiation
 
   real :: hval
@@ -656,6 +655,8 @@ subroutine offline_diabatic_ale(fluxes, Time_start, Time_end, CS, h_pre, eatr, e
   real :: stock_values(MAX_FIELDS_)
   real :: Kd_bot
   integer :: nstocks
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: eatr !< Entrainment from layer above
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: ebtr !< Entrainment from layer below
   nz = CS%GV%ke
   is = CS%G%isc ; ie = CS%G%iec ; js = CS%G%jsc ; je = CS%G%jec
 
@@ -697,27 +698,19 @@ subroutine offline_diabatic_ale(fluxes, Time_start, Time_end, CS, h_pre, eatr, e
   enddo ; enddo
   do k=2,nz ; do j=js,je ; do i=is,ie
     hval=1.0/(CS%GV%H_subroundoff + 0.5*(h_pre(i,j,k-1) + h_pre(i,j,k)))
-    eatr(i,j,k) = (CS%GV%m_to_H**2) * CS%dt_offline_vertical * hval * CS%Kd(i,j,k)
+    eatr(i,j,k) = (CS%GV%m_to_H**2) * dt_vert * hval * CS%Kd(i,j,k)
     ebtr(i,j,k-1) = eatr(i,j,k)
   enddo ; enddo ; enddo
   do j=js,je ; do i=is,ie
     ebtr(i,j,nz) = 0.
   enddo ; enddo
 
-  ! Add diurnal cycle for shortwave radiation (only used if run in ocean-only mode)
-  if (CS%diurnal_SW .and. CS%read_sw) then
-    sw(:,:) = fluxes%sw
-    sw_vis(:,:) = fluxes%sw_vis_dir
-    sw_nir(:,:) = fluxes%sw_nir_dir
-    call offline_add_diurnal_SW(fluxes, CS%G, Time_start, Time_end)
-  endif
-
   if (associated(CS%optics)) &
     call set_opacity(CS%optics, fluxes, CS%G, CS%GV, CS%opacity_CSp)
 
   ! Note that tracerBoundaryFluxesInOut within this subroutine should NOT be called
   ! as the freshwater fluxes have already been accounted for
-  call call_tracer_column_fns(h_pre, h_pre, eatr, ebtr, fluxes, CS%MLD, CS%dt_offline_vertical, CS%G, CS%GV, &
+  call call_tracer_column_fns(h_pre, h_pre, eatr, ebtr, fluxes, CS%MLD, dt_vert, CS%G, CS%GV, &
                               CS%tv, CS%optics, CS%tracer_flow_CSp, CS%debug)
 
   if (CS%diurnal_SW .and. CS%read_sw) then
