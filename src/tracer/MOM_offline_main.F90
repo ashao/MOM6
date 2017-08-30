@@ -60,7 +60,6 @@ type, public :: offline_transport_CS ; private
   integer :: start_index  !< Timelevel to start
   integer :: iter_no      !< Timelevel to start
   integer :: numtime      !< How many timelevels in the input fields
-  integer :: accumulated_time !< Length of time accumulated in the current offline interval
   integer :: &            !< Index of each of the variables to be read in
     ridx_sum = -1, &      !! Separate indices for each variable if they are
     ridx_snap = -1        !! setoff from each other in time
@@ -97,8 +96,10 @@ type, public :: offline_transport_CS ; private
   integer :: num_vert_iter  !< Number of vertical iterations per offline step
   integer :: num_lin_iter   !< Number of linearly limited advection iterations per offline step
   integer :: off_ale_mod    !< Sets how frequently the ALE step is done during the advection
+  real :: accumulated_time !< Length of time accumulated in the current offline interval
   real :: dt_offline ! Timestep used for offline tracers
-  real :: dt_offline_vertical ! Timestep used for calls to tracer vertical physics
+  real :: dt_vertical ! Timestep used for calls to tracer vertical physics
+  real :: dt_horizontal ! Timestep used for calls to tracer vertical physics
   real :: evap_CFL_limit, minimum_forcing_depth !< Copied from diabatic_CS controlling how tracers
                                                 !! follow freshwater fluxes
   real :: Kd_max        !< Runtime parameter specifying the maximum value of vertical diffusivity
@@ -136,8 +137,8 @@ type, public :: offline_transport_CS ; private
     id_clock_redistribute = -1
 
   !> Variables that may need to be stored between calls to step_MOM
-  real, allocatable, dimension(:,:,:) :: uhtr
-  real, allocatable, dimension(:,:,:) :: vhtr
+  real, allocatable, dimension(:,:,:) :: uhtr, uhtr_lin, uhtr_res
+  real, allocatable, dimension(:,:,:) :: vhtr, vhtr_lin, vhtr_res
 
   ! Fields at T-point
   real, allocatable, dimension(:,:,:) :: &
@@ -195,9 +196,9 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
   type(verticalGrid_type),    pointer :: GV => NULL() ! Pointer to structure containing information
                                                       ! about the vertical grid
   ! Work arrays for mass transports
-  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G))   :: uhtr_sub, uhtr_lin, uhtr_rem
+  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G))   :: uhtr_sub
   ! Meridional mass transports
-  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G))   :: vhtr_sub, vhtr_lin, vhtr_rem
+  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G))   :: vhtr_sub
 
   real :: prev_tot_residual, tot_residual  ! Used to keep track of how close to convergence we are
 
@@ -244,10 +245,6 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
   h_vol(:,:,:) = 0.0
   uhtr_sub(:,:,:) = 0.0
   vhtr_sub(:,:,:) = 0.0
-  uhtr_lin(:,:,:) = 0.
-  vhtr_lin(:,:,:) = 0.
-  uhtr_rem(:,:,:) = 0.
-  vhtr_rem(:,:,:) = 0.
 
   ! converged should only be true if there are no remaining mass fluxes
   converged = .false.
@@ -293,109 +290,86 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
     endif
   endif
 
-  do k =1,nz ; do j=js-1,je ; do i=is-1,ie
-    uhtr_lin(i,j,k) = uhtr(i,j,k)/CS%num_lin_iter
-    vhtr_lin(i,j,k) = vhtr(i,j,k)/CS%num_lin_iter
-  enddo ; enddo ; enddo
+  ! This loop does essentially a flux-limited, nonlinear advection scheme until all mass fluxes
+  ! are used. ALE is done after the horizontal advection.
+  do iter=1,CS%num_off_iter
 
-  do lin_iter = 1,CS%num_lin_iter
-    do k =1,nz ; do j=js-1,je ; do i=is-1,ie
-      uhtr_sub(i,j,k) = uhtr_lin(i,j,k)
-      vhtr_sub(i,j,k) = vhtr_lin(i,j,k)
+    do k=1,nz ; do j=js,je ; do i=is,ie
+      h_vol(i,j,k) = h_new(i,j,k)*G%areaT(i,j)
+      h_pre(i,j,k) = h_new(i,j,k)
     enddo ; enddo ; enddo
-    ! This loop does essentially a flux-limited, nonlinear advection scheme until all mass fluxes
-    ! are used. ALE is done after the horizontal advection.
-    do iter=1,CS%num_off_iter
 
-      do k=1,nz ; do j=js,je ; do i=is,ie
-        h_vol(i,j,k) = h_new(i,j,k)*G%areaT(i,j)
-        h_pre(i,j,k) = h_new(i,j,k)
-      enddo ; enddo ; enddo
+    if(CS%debug) then
+      call hchksum(h_vol,"h_vol before advect",G%HI)
+      call uvchksum("[uv]htr_sub before advect", uhtr_sub, vhtr_sub, G%HI)
+      write(debug_msg, '(A,I4.4)') 'Before advect ', iter
+      call MOM_tracer_chkinv(debug_msg, G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+    endif
 
-      if(CS%debug) then
-        call hchksum(h_vol,"h_vol before advect",G%HI)
-        call uvchksum("[uv]htr_sub before advect", uhtr_sub, vhtr_sub, G%HI)
-        write(debug_msg, '(A,I4.4)') 'Before advect ', iter
-        call MOM_tracer_chkinv(debug_msg, G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+    call advect_tracer(h_pre, uhtr_sub, vhtr_sub, CS%OBC, CS%dt_offline, G, GV, &
+        CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
+        uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
+
+    ! Switch the direction every iteration
+    x_before_y = .not. x_before_y
+
+    ! Update the new layer thicknesses after one round of advection has happened
+    do k=1,nz ; do j=js,je ; do i=is,ie
+      h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
+    enddo ; enddo ; enddo
+
+    if (MODULO(iter,CS%off_ale_mod)==0) then
+      ! Do ALE remapping/regridding to allow for more advection to occur in the next iteration
+      call pass_var(h_new,G%Domain)
+      if (CS%debug) then
+        call hchksum(h_new,"h_new before ALE",G%HI)
+        write(debug_msg, '(A,I4.4)') 'Before ALE ', iter
+        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
       endif
+      call cpu_clock_begin(id_clock_ALE)
+      call ALE_main_offline(G, GV, h_new, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%dt_offline)
+      call cpu_clock_end(id_clock_ALE)
 
-      call advect_tracer(h_pre, uhtr_sub, vhtr_sub, CS%OBC, CS%dt_offline, G, GV, &
-          CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
-          uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
-
-      ! Switch the direction every iteration
-      x_before_y = .not. x_before_y
-
-      ! Update the new layer thicknesses after one round of advection has happened
-      do k=1,nz ; do j=js,je ; do i=is,ie
-        h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
-      enddo ; enddo ; enddo
-
-      if (MODULO(iter,CS%off_ale_mod)==0) then
-        ! Do ALE remapping/regridding to allow for more advection to occur in the next iteration
-        call pass_var(h_new,G%Domain)
-        if (CS%debug) then
-          call hchksum(h_new,"h_new before ALE",G%HI)
-          write(debug_msg, '(A,I4.4)') 'Before ALE ', iter
-          call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
-        endif
-        call cpu_clock_begin(id_clock_ALE)
-        call ALE_main_offline(G, GV, h_new, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%dt_offline)
-        call cpu_clock_end(id_clock_ALE)
-
-        if (CS%debug) then
-          call hchksum(h_new,"h_new after ALE",G%HI)
-          write(debug_msg, '(A,I4.4)') 'After ALE ', iter
-          call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
-        endif
+      if (CS%debug) then
+        call hchksum(h_new,"h_new after ALE",G%HI)
+        write(debug_msg, '(A,I4.4)') 'After ALE ', iter
+        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
       endif
+    endif
 
-      do k=1,nz; do j=js,je ; do i=is,ie
-        uhtr_sub(I,j,k) = uhtr(I,j,k)
-        vhtr_sub(i,J,k) = vhtr(i,J,k)
-      enddo ; enddo ; enddo
-      call pass_var(h_new, G%Domain)
-      call pass_vector(uhtr_sub,vhtr_sub,G%Domain)
-
-      ! Check for whether we've used up all the advection, or if we need to move on because
-      ! advection has stalled
-      tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
-      if (CS%print_adv_offline) then
-        if (is_root_pe()) then
-          write(*,'(A,ES24.16)') "Main advection remaining transport: ", tot_residual
-        endif
-      endif
-      ! If all the mass transports have been used u, then quit
-      if (tot_residual == 0.0) then
-        if (is_root_pe()) write(0,*) "Converged after iteration", iter
-        converged = .true.
-        exit
-      endif
-      ! If advection has stalled or the remaining residual is less than a specified amount, quit
-      if ( (tot_residual == prev_tot_residual) .or. (tot_residual<CS%min_residual) ) then
-        converged = .false.
-        exit
-      endif
-
-      prev_tot_residual = tot_residual
-
-    enddo
     do k=1,nz; do j=js,je ; do i=is,ie
-      uhtr_rem(i,j,k) = uhtr_rem(i,j,k) + uhtr_sub(i,j,k)
-      vhtr_rem(i,j,k) = vhtr_rem(i,j,k) + vhtr_sub(i,j,k)
+      uhtr_sub(I,j,k) = uhtr(I,j,k)
+      vhtr_sub(i,J,k) = vhtr(i,J,k)
     enddo ; enddo ; enddo
+    call pass_var(h_new, G%Domain)
+    call pass_vector(uhtr_sub,vhtr_sub,G%Domain)
 
-    call offline_diabatic_ale(fluxes, (CS%dt_offline/CS%num_lin_iter), CS, h_new)
+    ! Check for whether we've used up all the advection, or if we need to move on because
+    ! advection has stalled
+    tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
+    if (CS%print_adv_offline) then
+      if (is_root_pe()) then
+        write(*,'(A,ES24.16)') "Main advection remaining transport: ", tot_residual
+      endif
+    endif
+    ! If all the mass transports have been used u, then quit
+    if (tot_residual == 0.0) then
+      if (is_root_pe()) write(0,*) "Converged after iteration", iter
+      converged = .true.
+      exit
+    endif
+    ! If advection has stalled or the remaining residual is less than a specified amount, quit
+    if ( (tot_residual == prev_tot_residual) .or. (tot_residual<CS%min_residual) ) then
+      converged = .false.
+      exit
+    endif
+
+    prev_tot_residual = tot_residual
+
   enddo
-
-  do k=1,nz; do j=js,je ; do i=is,ie
-    uhtr(i,j,k) = uhtr_rem(i,j,k)
-    vhtr(i,j,k) = vhtr_rem(i,j,k)
-  enddo ; enddo ; enddo
 
   ! Make sure that uhtr and vhtr halos are updated
   h_pre(:,:,:) = h_new(:,:,:)
-  call pass_vector(uhtr,vhtr,G%Domain)
 
   if (CS%debug) then
     call hchksum(h_pre,"h after offline_advection_ale",G%HI)
@@ -640,10 +614,10 @@ end function remaining_transport_sum
 !> The vertical/diabatic driver for offline tracers. First the eatr/ebtr associated with the interpolated
 !! vertical diffusivities are calculated and then any tracer column functions are done which can include
 !! vertical diffuvities and source/sink terms.
-subroutine offline_diabatic_ale(fluxes, dt_vert, CS, h_pre)
+subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
 
   type(forcing),    intent(inout)      :: fluxes        !< pointers to forcing fields
-  real,             intent(in)         :: dt_vert       !< starting time of a segment, as a time type
+  real,             intent(in)         :: dt_vertical       !< starting time of a segment, as a time type
   type(offline_transport_CS), pointer  :: CS            !< control structure from initialize_MOM
   real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout) :: h_pre
   real, dimension(SZI_(CS%G),SZJ_(CS%G))    :: sw, sw_vis, sw_nir !< Save old value of shortwave radiation
@@ -698,7 +672,7 @@ subroutine offline_diabatic_ale(fluxes, dt_vert, CS, h_pre)
   enddo ; enddo
   do k=2,nz ; do j=js,je ; do i=is,ie
     hval=1.0/(CS%GV%H_subroundoff + 0.5*(h_pre(i,j,k-1) + h_pre(i,j,k)))
-    eatr(i,j,k) = (CS%GV%m_to_H**2) * dt_vert * hval * CS%Kd(i,j,k)
+    eatr(i,j,k) = (CS%GV%m_to_H**2) * dt_vertical * hval * CS%Kd(i,j,k)
     ebtr(i,j,k-1) = eatr(i,j,k)
   enddo ; enddo ; enddo
   do j=js,je ; do i=is,ie
@@ -710,7 +684,7 @@ subroutine offline_diabatic_ale(fluxes, dt_vert, CS, h_pre)
 
   ! Note that tracerBoundaryFluxesInOut within this subroutine should NOT be called
   ! as the freshwater fluxes have already been accounted for
-  call call_tracer_column_fns(h_pre, h_pre, eatr, ebtr, fluxes, CS%MLD, dt_vert, CS%G, CS%GV, &
+  call call_tracer_column_fns(h_pre, h_pre, eatr, ebtr, fluxes, CS%MLD, dt_vertical, CS%G, CS%GV, &
                               CS%tv, CS%optics, CS%tracer_flow_CSp, CS%debug)
 
   if (CS%diurnal_SW .and. CS%read_sw) then
@@ -1164,23 +1138,32 @@ end subroutine post_offline_convergence_diags
 
 !> Extracts members of the offline main control structure. All arguments are optional except
 !! the control structure itself
-subroutine extract_offline_main(CS, uhtr, vhtr, eatr, ebtr, h_end, accumulated_time, dt_offline, dt_offline_vertical, &
-                                skip_diffusion)
+subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_end, &
+                                accumulated_time, dt_offline, dt_vertical, dt_horizontal, skip_diffusion)
   type(offline_transport_CS), target, intent(in   )  :: CS !< Offline control structure
   ! Returned optional arguments
   real, dimension(:,:,:), pointer, optional, intent(  out) :: uhtr
   real, dimension(:,:,:), pointer, optional, intent(  out) :: vhtr
+  real, dimension(:,:,:), pointer, optional, intent(  out) :: uhtr_lin
+  real, dimension(:,:,:), pointer, optional, intent(  out) :: vhtr_lin
+  real, dimension(:,:,:), pointer, optional, intent(  out) :: uhtr_res
+  real, dimension(:,:,:), pointer, optional, intent(  out) :: vhtr_res
   real, dimension(:,:,:), pointer, optional, intent(  out) :: eatr
   real, dimension(:,:,:), pointer, optional, intent(  out) :: ebtr
   real, dimension(:,:,:), pointer, optional, intent(  out) :: h_end
-  integer,                pointer, optional, intent(  out) :: accumulated_time
-  integer,                         optional, intent(  out) :: dt_offline
-  integer,                         optional, intent(  out) :: dt_offline_vertical
+  real,                   pointer, optional, intent(  out) :: accumulated_time
+  real,                            optional, intent(  out) :: dt_offline
+  real,                            optional, intent(  out) :: dt_vertical
+  real,                            optional, intent(  out) :: dt_horizontal
   logical,                         optional, intent(  out) :: skip_diffusion
 
   ! Pointers to 3d members
   if (present(uhtr)) uhtr => CS%uhtr
-  if (present(vhtr)) vhtr => CS%vhtr
+  if (present(uhtr)) uhtr => CS%uhtr
+  if (present(vhtr_lin)) vhtr_lin => CS%vhtr_lin
+  if (present(vhtr_lin)) vhtr_lin => CS%vhtr_lin
+  if (present(vhtr_res)) vhtr_res => CS%vhtr_res
+  if (present(vhtr_res)) vhtr_res => CS%vhtr_res
   if (present(eatr)) eatr => CS%eatr
   if (present(ebtr)) ebtr => CS%ebtr
   if (present(h_end)) h_end => CS%h_end
@@ -1190,7 +1173,8 @@ subroutine extract_offline_main(CS, uhtr, vhtr, eatr, ebtr, h_end, accumulated_t
 
   ! Return value of non-modified integers
   if (present(dt_offline))  dt_offline = CS%dt_offline
-  if (present(dt_offline_vertical)) dt_offline_vertical = CS%dt_offline_vertical
+  if (present(dt_vertical)) dt_vertical = CS%dt_vertical
+  if (present(dt_horizontal)) dt_vertical = CS%dt_horizontal
   if (present(skip_diffusion)) skip_diffusion = CS%skip_diffusion
 
 end subroutine extract_offline_main
@@ -1277,7 +1261,11 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
     "Number of vertical levels in offline input files", default = nz)
   call get_param(param_file, mdl, "DT_OFFLINE", CS%dt_offline, &
     "Length of time between reading in of input fields",      fail_if_missing = .true.)
-  call get_param(param_file, mdl, "DT_OFFLINE_VERTICAL", CS%dt_offline_vertical, &
+  call get_param(param_file, mdl, "dt_vertical", CS%dt_vertical, &
+    "Length of the offline timestep for tracer column sources/sinks\n" //&
+    "This should be set to the length of the coupling timestep for \n" //&
+    "tracers which need shortwave fluxes",                    fail_if_missing = .true.)
+  call get_param(param_file, mdl, "DT_OFFLINE_HORIZONTAL", CS%dt_horizontal, &
     "Length of the offline timestep for tracer column sources/sinks\n" //&
     "This should be set to the length of the coupling timestep for \n" //&
     "tracers which need shortwave fluxes",                    fail_if_missing = .true.)
@@ -1342,7 +1330,7 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
   CS%sum_file = trim(CS%offlinedir)//trim(CS%sum_file)
   CS%surf_file = trim(CS%offlinedir)//trim(CS%surf_file)
 
-  CS%num_vert_iter = CS%dt_offline/CS%dt_offline_vertical
+  CS%num_vert_iter = CS%dt_offline/CS%dt_vertical
 
   ! Map redistribute_method onto logicals in CS
   select case (redistribute_method)
@@ -1379,6 +1367,10 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
   ! Allocate arrays
   allocate(CS%uhtr(IsdB:IedB,jsd:jed,nz))   ; CS%uhtr(:,:,:) = 0.0
   allocate(CS%vhtr(isd:ied,JsdB:JedB,nz))   ; CS%vhtr(:,:,:) = 0.0
+  allocate(CS%uhtr_lin(IsdB:IedB,jsd:jed,nz))   ; CS%uhtr_lin(:,:,:) = 0.0
+  allocate(CS%vhtr_lin(isd:ied,JsdB:JedB,nz))   ; CS%vhtr_lin(:,:,:) = 0.0
+  allocate(CS%uhtr_res(IsdB:IedB,jsd:jed,nz))   ; CS%uhtr_res(:,:,:) = 0.0
+  allocate(CS%vhtr_res(isd:ied,JsdB:JedB,nz))   ; CS%vhtr_res(:,:,:) = 0.0
   allocate(CS%eatr(isd:ied,jsd:jed,nz))          ; CS%eatr(:,:,:) = 0.0
   allocate(CS%ebtr(isd:ied,jsd:jed,nz))          ; CS%ebtr(:,:,:) = 0.0
   allocate(CS%h_end(isd:ied,jsd:jed,nz))         ; CS%h_end(:,:,:) = 0.0

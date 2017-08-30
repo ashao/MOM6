@@ -1304,21 +1304,22 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
 
   logical :: first_iter    !< True if this is the first time step_offline has been called in a given interval
   logical :: last_iter     !< True if this is the last time step_tracer is to be called in an offline interval
-  logical :: do_vertical   !< If enough time has elapsed, do the diabatic tracer sources/sinks
   logical :: adv_converged !< True if all the horizontal fluxes have been used
 
-  integer :: dt_offline, dt_offline_vertical
+  real :: dt_offline, dt_vertical, dt_horizontal
   logical :: skip_diffusion
   integer :: id_eta_diff_end
 
-  integer, pointer :: accumulated_time
+  real, pointer :: accumulated_time
   integer :: i,j,k
-  integer :: is, ie, js, je, isd, ied, jsd, jed
+  integer :: is, ie, js, je, isd, ied, jsd, jed, nk
 
   ! 3D pointers
   real, dimension(:,:,:), pointer   :: &
-    uhtr, vhtr, &
-    eatr, ebtr, &
+    uhtr, vhtr,         &
+    uhtr_lin, vhtr_lin, &
+    uhtr_res, vhtr_res, &
+    eatr, ebtr,         &
     h_end
 
   ! 2D Array for diagnostics
@@ -1331,11 +1332,12 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec
   isd = G%isd  ; ied = G%ied  ; jsd = G%jsd  ; jed = G%jed
+  nk = G%ke
 
   call cpu_clock_begin(id_clock_offline_tracer)
-  call extract_offline_main(CS%offline_CSp, uhtr, vhtr, eatr, ebtr, h_end, accumulated_time, &
-                            dt_offline, dt_offline_vertical, skip_diffusion)
-  Time_end = increment_date(Time_start, seconds=floor(time_interval+0.001))
+  call extract_offline_main(CS%offline_CSp, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_end, &
+                            accumulated_time, dt_offline, dt_vertical, dt_horizontal, skip_diffusion)
+  Time_end = increment_date(Time_start, seconds=FLOOR(time_interval+EPSILON(time_interval)))
   call enable_averaging(time_interval, Time_end, CS%diag)
 
   ! Check to see if this is the first iteration of the offline interval
@@ -1344,16 +1346,8 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
   else ! This is probably unnecessary but is used to guard against unwanted behavior
     first_iter = .false.
   endif
-
-  ! Check to see if vertical tracer functions should  be done
-  if ( mod(accumulated_time, dt_offline_vertical) == 0 ) then
-    do_vertical = .true.
-  else
-    do_vertical = .false.
-  endif
-
   ! Increment the amount of time elapsed since last read and check if it's time to roll around
-  accumulated_time = mod(accumulated_time + int(time_interval), dt_offline)
+  accumulated_time = mod(accumulated_time + FLOOR(time_interval+EPSILON(time_interval)), dt_offline)
   if(accumulated_time==0) then
     last_iter = .true.
   else
@@ -1365,67 +1359,55 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
     ! perform the main advection.
     if (first_iter) then
       if(is_root_pe()) print *, "Reading in new offline fields"
-      ! Read in new transport and other fields
-      ! call update_transport_from_files(G, GV, CS%offline_CSp, h_end, eatr, ebtr, uhtr, vhtr, &
-      !     CS%tv%T, CS%tv%S, fluxes, CS%use_ALE_algorithm)
-      ! call update_transport_from_arrays(CS%offline_CSp)
       call update_offline_fields(CS%offline_CSp, CS%h, fluxes, CS%use_ALE_algorithm)
-
       ! Apply any fluxes into the ocean
       call offline_fw_fluxes_into_ocean(G, GV, CS%offline_CSp, fluxes, CS%h)
+      uhtr_res(:,:,:) = 0.
+      vhtr_res(:,:,:) = 0.
+    endif
 
-      if (.not.CS%diabatic_first) then
-        call offline_advection_ale(fluxes, Time_start, time_interval, CS%offline_CSp, id_clock_ALE, &
-            CS%h, uhtr, vhtr, converged=adv_converged)
-
-        ! Redistribute any remaining transport
-        call offline_redistribute_residual(CS%offline_CSp, CS%h, uhtr, vhtr, adv_converged)
-
-        ! Perform offline diffusion if requested
-        if (.not. skip_diffusion) then
-          if (associated(CS%VarMix)) then
-            call pass_var(CS%h,G%Domain)
-            call calc_resoln_function(CS%h, CS%tv, G, GV, CS%VarMix)
-            call calc_slope_functions(CS%h, CS%tv, REAL(dt_offline), G, GV, CS%VarMix)
-          endif
-          call tracer_hordiff(CS%h, REAL(dt_offline), CS%MEKE, CS%VarMix, G, GV, &
-              CS%tracer_diff_CSp, CS%tracer_Reg, CS%tv)
+    ! Diabatic first
+    if (CS%diabatic_first .and. mod(accumulated_time, dt_vertical) == 0 ) then
+      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, CS%h)
+    endif
+    if (mod(accumulated_time, dt_horizontal) == 0.) then
+      ! Scale mass fluxes back
+      do k=1,nk ; do j=js,je ; do i=is,ie
+        uhtr_lin(i,j,k) = uhtr(i,j,k)*(dt_horizontal/accumulated_time)
+        vhtr_lin(i,j,k) = vhtr(i,j,k)*(dt_horizontal/accumulated_time)
+      enddo ; enddo ; enddo
+      call offline_advection_ale(fluxes, Time_start, dt_horizontal, CS%offline_CSp, id_clock_ALE, &
+          CS%h, uhtr_lin, vhtr_lin, converged=adv_converged)
+      ! Store the amount of remaining residual transport
+      do k=1,nk ; do j=js,je ; do i=is,ie
+        uhtr_res(i,j,k) = uhtr_res(i,j,k) + uhtr_lin(i,j,k)
+        vhtr_res(i,j,k) = vhtr_res(i,j,k) + vhtr_lin(i,j,k)
+      enddo ; enddo ; enddo
+      ! Perform offline diffusion if requested
+      if (.not. skip_diffusion) then
+        if (associated(CS%VarMix)) then
+          call pass_var(CS%h,G%Domain)
+          call calc_resoln_function(CS%h, CS%tv, G, GV, CS%VarMix)
+          call calc_slope_functions(CS%h, CS%tv, dt_horizontal, G, GV, CS%VarMix)
         endif
+        call tracer_hordiff(CS%h, dt_horizontal, CS%MEKE, CS%VarMix, G, GV, CS%tracer_diff_CSp, CS%tracer_Reg, CS%tv)
       endif
     endif
-    ! The functions related to column physics of tracers is performed separately in ALE mode
-    if (do_vertical) then
-!      call offline_diabatic_ale(fluxes, Time_start, Time_end, CS%offline_CSp, CS%h, eatr, ebtr)
+    ! Not diabatic first
+    if (.not. CS%diabatic_first .and. mod(accumulated_time, dt_vertical) == 0 ) then
+      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, CS%h)
     endif
 
     ! Last thing that needs to be done is the final ALE remapping
     if(last_iter) then
-      if (CS%diabatic_first) then
-        call offline_advection_ale(fluxes, Time_start, time_interval, CS%offline_CSp, id_clock_ALE, &
-            CS%h, uhtr, vhtr, converged=adv_converged)
-
-        ! Redistribute any remaining transport and perform the remaining advection
-        call offline_redistribute_residual(CS%offline_CSp, CS%h, uhtr, vhtr, adv_converged)
-                ! Perform offline diffusion if requested
-        if (.not. skip_diffusion) then
-          if (associated(CS%VarMix)) then
-            call pass_var(CS%h,G%Domain)
-            call calc_resoln_function(CS%h, CS%tv, G, GV, CS%VarMix)
-            call calc_slope_functions(CS%h, CS%tv, REAL(dt_offline), G, GV, CS%VarMix)
-          endif
-          call tracer_hordiff(CS%h, REAL(dt_offline), CS%MEKE, CS%VarMix, G, GV, &
-              CS%tracer_diff_CSp, CS%tracer_Reg, CS%tv)
-        endif
-      endif
-
       if(is_root_pe()) print *, "Last iteration of offline interval"
-
+      ! Redistribute any remaining transport
+      call offline_redistribute_residual(CS%offline_CSp, CS%h, uhtr_res, vhtr_res, adv_converged)
       ! Apply freshwater fluxes out of the ocean
       call offline_fw_fluxes_out_ocean(G, GV, CS%offline_CSp, fluxes, CS%h)
       ! These diagnostic can be used to identify which grid points did not converge within
       ! the specified number of advection sub iterations
-      call post_offline_convergence_diags(CS%offline_CSp, CS%h, h_end, uhtr, vhtr)
-
+      call post_offline_convergence_diags(CS%offline_CSp, CS%h, h_end, uhtr_res, vhtr_res)
       ! Call ALE one last time to make sure that tracers are remapped onto the layer thicknesses
       ! stored from the forward run
       call cpu_clock_begin(id_clock_ALE)
