@@ -94,7 +94,6 @@ type, public :: offline_transport_CS ; private
   !! Variables controlling some of the numerical considerations of offline transport
   integer :: num_off_iter   !< Number of advection iterations per offline step
   integer :: num_vert_iter  !< Number of vertical iterations per offline step
-  integer :: num_lin_iter   !< Number of linearly limited advection iterations per offline step
   integer :: off_ale_mod    !< Sets how frequently the ALE step is done during the advection
   real :: accumulated_time !< Length of time accumulated in the current offline interval
   real :: dt_offline ! Timestep used for offline tracers
@@ -208,7 +207,7 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
       h_vol
   ! Fields for eta_diff diagnostic
   real, dimension(SZI_(CS%G),SZJ_(CS%G))         :: eta_pre, eta_end
-  integer                                        :: niter, iter, lin_iter
+  integer                                        :: niter, iter
   real                                           :: Inum_iter
   integer :: i, j, k, m, is, ie, js, je, isd, ied, jsd, jed, nz
   integer :: isv, iev, jsv, jev ! The valid range of the indices.
@@ -310,9 +309,6 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
         CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
         uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
 
-    ! Switch the direction every iteration
-    x_before_y = .not. x_before_y
-
     ! Update the new layer thicknesses after one round of advection has happened
     do k=1,nz ; do j=js,je ; do i=is,ie
       h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
@@ -370,6 +366,7 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
 
   ! Make sure that uhtr and vhtr halos are updated
   h_pre(:,:,:) = h_new(:,:,:)
+  call pass_vector(uhtr,vhtr,G%Domain)
 
   if (CS%debug) then
     call hchksum(h_pre,"h after offline_advection_ale",G%HI)
@@ -640,8 +637,6 @@ subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
 
   if (CS%debug) then
     call hchksum(h_pre,"h_pre before offline_diabatic_ale",CS%G%HI)
-    call hchksum(eatr,"eatr before offline_diabatic_ale",CS%G%HI)
-    call hchksum(ebtr,"ebtr before offline_diabatic_ale",CS%G%HI)
     call MOM_tracer_chkinv("Before offline_diabatic_ale", CS%G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
   endif
 
@@ -961,14 +956,10 @@ subroutine update_offline_fields(CS, h, fluxes, do_ale)
   logical,              intent(in   ) :: do_ale !< True if using ALE
   ! Local variables
   integer :: i, j, k, is, ie, js, je, nz
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: h_start
   is = CS%G%isc ; ie = CS%G%iec ; js = CS%G%jsc ; je = CS%G%jec ; nz = CS%GV%ke
 
   call cpu_clock_begin(CS%id_clock_read_fields)
   call callTree_enter("update_offline_fields, MOM_offline_main.F90")
-
-  ! Store a copy of the layer thicknesses before ALE regrid/remap
-  h_start(:,:,:) = h(:,:,:)
 
   ! Most fields will be read in from files
   call update_offline_from_files( CS%G, CS%GV, CS%nk_input, CS%mean_file, CS%sum_file, CS%snap_file, CS%surf_file,    &
@@ -989,6 +980,7 @@ subroutine update_offline_fields(CS, h, fluxes, do_ale)
     call pass_var(h, CS%G%Domain)
     call pass_var(CS%tv%T, CS%G%Domain)
     call pass_var(CS%tv%S, CS%G%Domain)
+    call pass_vector(CS%uhtr, CS%vhtr, CS%G%Domain)
     call ALE_offline_inputs(CS%ALE_CSp, CS%G, CS%GV, h, CS%tv, CS%tracer_Reg, CS%uhtr, CS%vhtr, CS%Kd, CS%debug)
     if (CS%id_temp_regrid>0) call post_data(CS%id_temp_regrid, CS%tv%T, CS%diag)
     if (CS%id_salt_regrid>0) call post_data(CS%id_salt_regrid, CS%tv%S, CS%diag)
@@ -997,14 +989,8 @@ subroutine update_offline_fields(CS, h, fluxes, do_ale)
     if (CS%id_h_regrid>0) call post_data(CS%id_h_regrid, h, CS%diag)
     if (CS%debug) then
       call uvchksum("[uv]h after ALE regridding/remapping of inputs", CS%uhtr, CS%vhtr, CS%G%HI)
-      call hchksum(h_start,"h_start after update offline from files and arrays", CS%G%HI)
     endif
   endif
-
-  ! Update halos for some
-  call pass_var(CS%h_end, CS%G%Domain)
-  call pass_var(CS%tv%T, CS%G%Domain)
-  call pass_var(CS%tv%S, CS%G%Domain)
 
   ! Update the read indices
   CS%ridx_snap = next_modulo_time(CS%ridx_snap,CS%numtime)
@@ -1024,17 +1010,22 @@ subroutine update_offline_fields(CS, h, fluxes, do_ale)
     endif
   enddo ; enddo ; enddo ;
 
-  do k=1,nz ; do J=js-1,je ; do i=is,ie
+  do k=1,nz ; do J=js,je ; do i=is,ie
     if (CS%G%mask2dCv(i,J)<1.0) then
       CS%vhtr(i,J,k) = 0.0
     endif
   enddo; enddo ; enddo
 
-  do k=1,nz ; do j=js,je ; do I=is-1,ie
+  do k=1,nz ; do j=js,je ; do I=is,ie
     if (CS%G%mask2dCu(I,j)<1.0) then
       CS%uhtr(I,j,k) = 0.0
     endif
   enddo; enddo ; enddo
+
+  ! Update halos for some
+  call pass_var(CS%h_end, CS%G%Domain)
+  call pass_var(CS%tv%T, CS%G%Domain)
+  call pass_var(CS%tv%S, CS%G%Domain)
 
   if (CS%debug) then
     call uvchksum("[uv]htr_sub after update_offline_fields", CS%uhtr, CS%vhtr, CS%G%HI)
@@ -1159,10 +1150,10 @@ subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vh
 
   ! Pointers to 3d members
   if (present(uhtr)) uhtr => CS%uhtr
-  if (present(uhtr)) uhtr => CS%uhtr
+  if (present(vhtr)) vhtr => CS%vhtr
+  if (present(uhtr_lin)) uhtr_lin => CS%uhtr_lin
   if (present(vhtr_lin)) vhtr_lin => CS%vhtr_lin
-  if (present(vhtr_lin)) vhtr_lin => CS%vhtr_lin
-  if (present(vhtr_res)) vhtr_res => CS%vhtr_res
+  if (present(uhtr_res)) uhtr_res => CS%uhtr_res
   if (present(vhtr_res)) vhtr_res => CS%vhtr_res
   if (present(eatr)) eatr => CS%eatr
   if (present(ebtr)) ebtr => CS%ebtr
@@ -1174,7 +1165,7 @@ subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vh
   ! Return value of non-modified integers
   if (present(dt_offline))  dt_offline = CS%dt_offline
   if (present(dt_vertical)) dt_vertical = CS%dt_vertical
-  if (present(dt_horizontal)) dt_vertical = CS%dt_horizontal
+  if (present(dt_horizontal)) dt_horizontal = CS%dt_horizontal
   if (present(skip_diffusion)) skip_diffusion = CS%skip_diffusion
 
 end subroutine extract_offline_main
@@ -1261,7 +1252,7 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
     "Number of vertical levels in offline input files", default = nz)
   call get_param(param_file, mdl, "DT_OFFLINE", CS%dt_offline, &
     "Length of time between reading in of input fields",      fail_if_missing = .true.)
-  call get_param(param_file, mdl, "dt_vertical", CS%dt_vertical, &
+  call get_param(param_file, mdl, "DT_OFFLINE_VERTICAL", CS%dt_vertical, &
     "Length of the offline timestep for tracer column sources/sinks\n" //&
     "This should be set to the length of the coupling timestep for \n" //&
     "tracers which need shortwave fluxes",                    fail_if_missing = .true.)
@@ -1285,9 +1276,6 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
   call get_param(param_file, mdl, "NUM_OFF_ITER", CS%num_off_iter, &
     "Number of iterations to subdivide the offline tracer advection and diffusion", &
     default = 60)
-  call get_param(param_file, mdl, "NUM_LIN_ITER", CS%num_lin_iter, &
-    "Number of iterations to linearly limit the amount of transport per iteration", &
-    default = 5)
   call get_param(param_file, mdl, "OFF_ALE_MOD", CS%off_ale_mod, &
     "Sets how many horizontal advection steps are taken before an ALE\n" //&
     "remapping step is done. 1 would be x->y->ALE, 2 would be"           //&
