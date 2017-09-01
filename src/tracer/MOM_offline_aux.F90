@@ -646,18 +646,19 @@ subroutine update_offline_from_files(G, GV, nk_input, mean_file, sum_file, snap_
       timelevel=ridx_sum,position=CENTER)
     call read_data(mean_file, 'salt', salt_mean(:,:,1:nk_input), domain=G%Domain%mpp_domain, &
       timelevel=ridx_sum,position=CENTER)
+    do k = nk_input,nz ; do j=js,je ; do i=is,ie
+      temp_mean(i,j,k) = temp_mean(i,j,nk_input)
+      salt_mean(i,j,k) = salt_mean(i,j,nk_input)
+    enddo ; enddo ; enddo
   endif
 
-  do j=js,je ; do i=is,ie
-    if (G%mask2dT(i,j)>0.) then
-      temp_mean(:,:,nk_input:nz) = temp_mean(i,j,nk_input)
-      salt_mean(:,:,nk_input:nz) = salt_mean(i,j,nk_input)
-    endif
-  enddo ; enddo
 
   ! Check if reading vertical diffusivities or entrainment fluxes
   call read_data( mean_file, 'Kd_interface', Kd(:,:,1:nk_input+1), domain=G%Domain%mpp_domain, &
                   timelevel=ridx_sum,position=CENTER)
+  do k = nk_input+1,nz ; do j=js,je ; do i=is,ie
+    Kd(i,j,k) = Kd(i,j,nk_input+1)
+  enddo ; enddo ; enddo
 
   ! This block makes sure that the fluxes control structure, which may not be used in the solo_driver,
   ! contains netMassIn and netMassOut which is necessary for the applyTracerBoundaryFluxesInOut routine
@@ -769,13 +770,12 @@ subroutine update_offline_from_arrays(G, GV, nk_input, ridx_sum, mean_file, sum_
     salt(i,j,k) = salt_all(i,j,k,ridx_sum)
   enddo ; enddo ; enddo
 
-  ! Fill the rest of the arrays with 0s (fill_value could probably be changed to a runtime parameter)
+  ! Fill the rest of the array
   do k=nk_input+1,nz ; do j=js,je ; do i=is,ie
-    uhtr(I,j,k) = fill_value
-    vhtr(i,J,k) = fill_value
-    hend(i,j,k) = fill_value
-    temp(i,j,k) = fill_value
-    salt(i,j,k) = fill_value
+    uhtr(I,j,k) = 0.
+    vhtr(i,J,k) = 0.
+    temp(i,j,k) = temp(i,j,nk_input)
+    salt(i,j,k) = salt(i,j,nk_input)
   enddo ; enddo ; enddo
 
 end subroutine update_offline_from_arrays

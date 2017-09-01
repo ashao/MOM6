@@ -378,6 +378,217 @@ subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock
 
 end subroutine offline_advection_ale
 
+!!> 3D advection is done by doing flux-limited nonlinear horizontal advection interspersed with an ALE
+!!! regridding/remapping step. The loop in this routine is exited if remaining residual transports are below
+!!! a runtime-specified value or a maximum number of iterations is reached.
+!subroutine offline_advection_ale(fluxes, Time_start, time_interval, CS, id_clock_ale, h_pre, uhtr, vhtr, converged)
+!  type(forcing),    intent(inout)      :: fluxes        !< pointers to forcing fields
+!  type(time_type),  intent(in)         :: Time_start    !< starting time of a segment, as a time type
+!  real,             intent(in)         :: time_interval !< time interval
+!  type(offline_transport_CS), pointer  :: CS            !< control structure for offline module
+!  integer,          intent(in)         :: id_clock_ALE  !< Clock for ALE routines
+!  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)),  intent(inout)  :: h_pre !< layer thicknesses before advection
+!  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout)  :: uhtr  !< Zonal mass transport
+!  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G)), intent(inout)  :: vhtr  !< Meridional mass transport
+!  logical,                                            intent(  out)  :: converged
+!
+!  ! Local pointers
+!  type(ocean_grid_type),      pointer :: G  => NULL() ! Pointer to a structure containing
+!                                                      ! metrics and related information
+!  type(verticalGrid_type),    pointer :: GV => NULL() ! Pointer to structure containing information
+!                                                      ! about the vertical grid
+!  ! Work arrays for mass transports
+!  real, dimension(SZIB_(CS%G),SZJ_(CS%G),SZK_(CS%G))   :: uhtr_sub
+!  ! Meridional mass transports
+!  real, dimension(SZI_(CS%G),SZJB_(CS%G),SZK_(CS%G))   :: vhtr_sub
+!
+!  real :: prev_tot_residual, tot_residual  ! Used to keep track of how close to convergence we are
+!
+!  ! Variables used to keep track of layer thicknesses at various points in the code
+!  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: &
+!      h_new, &
+!      h_vol
+!  ! Fields for eta_diff diagnostic
+!  real, dimension(SZI_(CS%G),SZJ_(CS%G))         :: eta_pre, eta_end
+!  integer                                        :: niter, iter, lin_iter
+!  real                                           :: Inum_iter
+!  integer :: i, j, k, m, is, ie, js, je, isd, ied, jsd, jed, nz
+!  integer :: isv, iev, jsv, jev ! The valid range of the indices.
+!  integer :: IsdB, IedB, JsdB, JedB
+!  logical :: z_first, x_before_y
+!  real :: evap_CFL_limit, minimum_forcing_depth, dt_iter, dt_offline
+!
+!  integer :: nstocks
+!  real :: stock_values(MAX_FIELDS_)
+!  character*20 :: debug_msg
+!  call cpu_clock_begin(CS%id_clock_offline_adv)
+!
+!  ! Grid-related pointer assignments
+!  G => CS%G
+!  GV => CS%GV
+!
+!  x_before_y = CS%x_before_y
+!
+!  ! Initialize some shorthand variables from other structures
+!  is  = G%isc ; ie  = G%iec ; js  = G%jsc ; je  = G%jec ; nz = GV%ke
+!  isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
+!  IsdB = G%IsdB ; IedB = G%IedB ; JsdB = G%JsdB ; JedB = G%JedB
+!
+!  dt_offline = CS%dt_offline
+!  evap_CFL_limit = CS%evap_CFL_limit
+!  minimum_forcing_depth = CS%minimum_forcing_depth
+!
+!  niter = CS%num_off_iter
+!  Inum_iter = 1./real(niter)
+!  dt_iter = dt_offline*Inum_iter
+!
+!  ! Initialize working arrays
+!  h_new(:,:,:) = 0.0
+!  h_vol(:,:,:) = 0.0
+!  uhtr_sub(:,:,:) = 0.0
+!  vhtr_sub(:,:,:) = 0.0
+!
+!  ! converged should only be true if there are no remaining mass fluxes
+!  converged = .false.
+!  call pass_vector(uhtr, vhtr, G%Domain)
+!  ! Tracers are transported using the stored mass fluxes. Where possible, operators are Strang-split around
+!  ! the call to
+!  ! 1)  Using the layer thicknesses and tracer concentrations from the previous timestep,
+!  !     half of the accumulated vertical mixing (eatr and ebtr) is applied in the call to tracer_column_fns.
+!  !     For tracers whose source/sink terms need dt, this value is set to 1/2 dt_offline
+!  ! 2)  Half of the accumulated surface freshwater fluxes are applied
+!  !! START ITERATION
+!  ! 3)  Accumulated mass fluxes are used to do horizontal transport. The number of iterations used in
+!  !     advect_tracer is limited to 2 (e.g x->y->x->y). The remaining mass fluxes are stored for later use
+!  !     and resulting layer thicknesses fed into the next step
+!  ! 4)  Tracers and the h-grid are regridded and remapped in a call to ALE. This allows for layers which might
+!  !     'vanish' because of horizontal mass transport to be 'reinflated'
+!  ! 5)  Check that transport is done if the remaining mass fluxes equals 0 or if the max number of iterations
+!  !     has been reached
+!  !! END ITERATION
+!  ! 6)  Repeat steps 1 and 2
+!  ! 7)  Force a remapping to the stored layer thicknesses that correspond to the snapshot of the online model
+!  ! 8)  Reset T/S and h to their stored snapshotted values to prevent model drift
+!
+!  ! Copy over the horizontal mass fluxes from the total mass fluxes
+!  do k=1,nz ; do j=jsd,jed ; do i=isdB,iedB
+!    uhtr_sub(I,j,k) = uhtr(I,j,k)
+!  enddo ; enddo ; enddo
+!  do k=1,nz ; do j=jsdB,jedB ; do i=isd,ied
+!    vhtr_sub(i,J,k) = vhtr(i,J,k)
+!  enddo ; enddo ; enddo
+!  do k=1,nz ; do j=js,je ; do i=is,ie
+!    h_new(i,j,k) = h_pre(i,j,k)
+!  enddo ; enddo ; enddo
+!
+!  if (CS%debug) then
+!    call hchksum(h_pre,"h_pre before transport",G%HI)
+!    call uvchksum("[uv]htr_sub before transport", uhtr_sub, vhtr_sub, G%HI)
+!  endif
+!  tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
+!  if (CS%print_adv_offline) then
+!    if (is_root_pe()) then
+!      write(*,'(A,ES24.16)') "Main advection starting transport: ", tot_residual
+!    endif
+!  endif
+!
+!  ! This loop does essentially a flux-limited, nonlinear advection scheme until all mass fluxes
+!  ! are used. ALE is done after the horizontal advection.
+!  do iter=1,CS%num_off_iter
+!
+!    do k=1,nz ; do j=js,je ; do i=is,ie
+!      h_vol(i,j,k) = h_new(i,j,k)*G%areaT(i,j)
+!      h_pre(i,j,k) = h_new(i,j,k)
+!    enddo ; enddo ; enddo
+!
+!    if(CS%debug) then
+!      call hchksum(h_vol,"h_vol before advect",G%HI)
+!      call uvchksum("[uv]htr_sub before advect", uhtr_sub, vhtr_sub, G%HI)
+!      write(debug_msg, '(A,I4.4)') 'Before advect ', iter
+!      call MOM_tracer_chkinv(debug_msg, G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+!    endif
+!
+!    call advect_tracer(h_pre, uhtr_sub, vhtr_sub, CS%OBC, CS%dt_offline, G, GV, &
+!        CS%tracer_adv_CSp, CS%tracer_Reg, h_vol, max_iter_in=1, &
+!        uhr_out=uhtr, vhr_out=vhtr, h_out=h_new, x_first_in=x_before_y)
+!
+!    ! Switch the direction every iteration
+!    x_before_y = .not. x_before_y
+!
+!    ! Update the new layer thicknesses after one round of advection has happened
+!    do k=1,nz ; do j=js,je ; do i=is,ie
+!      h_new(i,j,k) = h_new(i,j,k)/G%areaT(i,j)
+!    enddo ; enddo ; enddo
+!
+!    if (MODULO(iter,CS%off_ale_mod)==0) then
+!      ! Do ALE remapping/regridding to allow for more advection to occur in the next iteration
+!      call pass_var(h_new,G%Domain)
+!      if (CS%debug) then
+!        call hchksum(h_new,"h_new before ALE",G%HI)
+!        write(debug_msg, '(A,I4.4)') 'Before ALE ', iter
+!        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+!      endif
+!      call cpu_clock_begin(id_clock_ALE)
+!      call ALE_main_offline(G, GV, h_new, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%dt_offline)
+!      call cpu_clock_end(id_clock_ALE)
+!
+!      if (CS%debug) then
+!        call hchksum(h_new,"h_new after ALE",G%HI)
+!        write(debug_msg, '(A,I4.4)') 'After ALE ', iter
+!        call MOM_tracer_chkinv(debug_msg, G, h_new, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+!      endif
+!    endif
+!
+!    do k=1,nz; do j=js,je ; do i=is,ie
+!      uhtr_sub(I,j,k) = uhtr(I,j,k)
+!      vhtr_sub(i,J,k) = vhtr(i,J,k)
+!    enddo ; enddo ; enddo
+!    call pass_var(h_new, G%Domain)
+!    call pass_vector(uhtr_sub,vhtr_sub,G%Domain)
+!
+!    ! Check for whether we've used up all the advection, or if we need to move on because
+!    ! advection has stalled
+!    tot_residual = remaining_transport_sum(CS, uhtr, vhtr)
+!    if (CS%print_adv_offline) then
+!      if (is_root_pe()) then
+!        write(*,'(A,ES24.16)') "Main advection remaining transport: ", tot_residual
+!      endif
+!    endif
+!    ! If all the mass transports have been used u, then quit
+!    if (tot_residual == 0.0) then
+!      if (is_root_pe()) write(0,*) "Converged after iteration", iter
+!      converged = .true.
+!      exit
+!    endif
+!    ! If advection has stalled or the remaining residual is less than a specified amount, quit
+!    if ( (tot_residual == prev_tot_residual) .or. (tot_residual<CS%min_residual) ) then
+!      converged = .false.
+!      exit
+!    endif
+!
+!    prev_tot_residual = tot_residual
+!
+!  enddo
+!
+!  do k=1,nz; do j=js,je ; do i=is,ie
+!    uhtr_sub(I,j,k) = uhtr(I,j,k)
+!    vhtr_sub(i,J,k) = vhtr(i,J,k)
+!  enddo ; enddo ; enddo
+!  ! Make sure that uhtr and vhtr halos are updated
+!  h_pre(:,:,:) = h_new(:,:,:)
+!  call pass_var(h_pre, G%Domain)
+!  call pass_vector(uhtr, vhtr, G%Domain)
+!
+!  if (CS%debug) then
+!    call hchksum(h_pre,"h after offline_advection_ale",G%HI)
+!    call uvchksum("[uv]htr after offline_advection_ale", uhtr, vhtr, G%HI)
+!    call MOM_tracer_chkinv("After offline_advection_ale", G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
+!  endif
+!
+!  call cpu_clock_end(CS%id_clock_offline_adv)
+!
+!end subroutine offline_advection_ale
+
 !> In the case where the main advection routine did not converge, something needs to be done with the remaining
 !! transport. Two different ways are offered, 'barotropic' means that the residual is distributed equally
 !! throughout the water column. 'upwards' attempts to redistribute the transport in the layers above and will
@@ -643,25 +854,6 @@ subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
   eatr(:,:,:) = 0.
   ebtr(:,:,:) = 0.
   ! Calculate eatr and ebtr if vertical diffusivity is read
-  ! Because the saved remapped diagnostics from the online run assume a zero minimum thickness
-  ! but ALE may have a minimum thickness. Flood the diffusivities for all layers with the value
-  ! of Kd closest to the bottom which is non-zero
-  do j=js,je ; do i=is,ie
-    k_nonzero = nz+1
-    ! Find the nonzero bottom Kd
-    do k=nz+1,1,-1
-      if (CS%Kd(i,j,k)>0.) then
-        Kd_bot = CS%Kd(i,j,k)
-        k_nonzero = k
-        exit
-      endif
-    enddo
-    ! Flood the bottom interfaces
-    do k=k_nonzero,nz+1
-      CS%Kd(i,j,k) = Kd_bot
-    enddo
-  enddo ; enddo
-
   do j=js,je ; do i=is,ie
     eatr(i,j,1) = 0.
   enddo ; enddo
