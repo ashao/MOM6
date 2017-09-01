@@ -41,6 +41,7 @@ type, public :: neutral_diffusion_CS ; private
   logical :: continuous_reconstruction = .true.   ! True if using continuous PPM reconstruction at interfaces
   logical :: boundary_extrap = .true.
   logical :: refine_position = .false.
+  logical :: lin_gradient = .true.
   integer :: max_iter ! Maximum number of iterations if refine_position is defined
   real :: tolerance   ! Convergence criterion representing difference from true neutrality
   real :: ref_pres    ! Reference pressure, negative if using locally referenced neutral density
@@ -130,6 +131,14 @@ logical function neutral_diffusion_init(Time, G, param_file, diag, CS)
                  "If false, a PPM discontinuous reconstruction of T and S    \n"//  &
                  "is done which results in a higher order routine but exacts \n"//  &
                  "a higher computational cost.", default=.true.)
+  if (CS%continuous_reconstruction) then
+    call get_param(param_file, mdl, "NDIFF_LIN_GRADIENT", CS%lin_gradient,            &
+                 "If true, linearly interpolate between interface values when\n"//  &
+                 "calculating to calculate the tracer value at the position  \n"//  &
+                 "of a neutral surface. If false, this will correctly use the\n"//  &
+                 "parabolic reconstructions.", default=.true.)
+  endif
+
   call get_param(param_file, mdl, "NDIFF_REF_PRES", CS%ref_pres,                    &
                  "The reference pressure (Pa) used for the derivatives of    \n"//  &
                  "the equation of state. If negative (default), local        \n"//  &
@@ -522,7 +531,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer, m, dt, name, CS)
                                 CS%uPoL(I,j,:), CS%uPoR(I,j,:), &
                                 CS%uKoL(I,j,:), CS%uKoR(I,j,:), &
                                 CS%uhEff(I,j,:), uFlx(I,j,:), &
-                                CS%continuous_reconstruction, CS%remap_CS)
+                                CS%continuous_reconstruction, CS%remap_CS, CS%lin_gradient)
     endif
   enddo ; enddo
 
@@ -534,7 +543,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer, m, dt, name, CS)
                                 CS%vPoL(i,J,:), CS%vPoR(i,J,:), &
                                 CS%vKoL(i,J,:), CS%vKoR(i,J,:), &
                                 CS%vhEff(i,J,:), vFlx(i,J,:),   &
-                                CS%continuous_reconstruction, CS%remap_CS)
+                                CS%continuous_reconstruction, CS%remap_CS, CS%lin_gradient)
     endif
   enddo ; enddo
 
@@ -1769,7 +1778,8 @@ subroutine calc_delta_rho(deg, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, 
 end subroutine calc_delta_rho
 
 !> Returns a single column of neutral diffusion fluxes of a tracer.
-subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, KoR, hEff, Flx, continuous, remap_CS)
+subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, KoR, hEff, Flx, continuous, remap_CS, &
+                               lin_gradient_in)
   integer,                      intent(in)    :: nk    !< Number of levels
   integer,                      intent(in)    :: nsurf !< Number of neutral surfaces
   integer,                      intent(in)    :: deg   !< Degree of polynomial reconstructions
@@ -1787,6 +1797,7 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
   real, dimension(nsurf-1),     intent(inout) :: Flx   !< Flux of tracer between pairs of neutral layers (conc H)
   logical,                      intent(in)    :: continuous !< True if using continuous reconstruction
   type(remapping_CS), optional, intent(in)    :: remap_CS
+  logical,            optional, intent(in)    :: lin_gradient_in
   ! Local variables
   integer :: k_sublayer, klb, klt, krb, krt, k
   real :: T_right_top, T_right_bottom, T_right_layer
@@ -1807,8 +1818,16 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
   real, dimension(nk,deg+1) :: ppoly_r_S_l
   real, dimension(nk,deg+1) :: ppoly_r_S_r
 
+  logical :: lin_gradient
+
+  if (present(lin_gradient_in)) then
+    lin_gradient = lin_gradient_in
+  else
+    lin_gradient = .true.
+  endif
+
   ! Setup reconstruction edge values
-  if (continuous) then
+  if (continuous .and. lin_gradient) then
     call interface_scalar(nk, hl, Tl, Til, 2)
     call interface_scalar(nk, hr, Tr, Tir, 2)
     call ppm_left_right_edge_values(nk, Tl, Til, aL_l, aR_l)
@@ -1829,16 +1848,26 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
     else
       if (continuous) then
         klb = KoL(k_sublayer+1)
-        T_left_bottom = ( 1. - PiL(k_sublayer+1) ) * Til(klb) + PiL(k_sublayer+1) * Til(klb+1)
         klt = KoL(k_sublayer)
-        T_left_top = ( 1. - PiL(k_sublayer) ) * Til(klt) + PiL(k_sublayer) * Til(klt+1)
+        if (lin_gradient) then
+          T_left_top = ( 1. - PiL(k_sublayer) ) * Til(klt) + PiL(k_sublayer) * Til(klt+1)
+          T_left_bottom = ( 1. - PiL(k_sublayer+1) ) * Til(klb) + PiL(k_sublayer+1) * Til(klb+1)
+        else
+          T_left_top = ppm_eval(PiL(k_sublayer), ppoly_r_coeffs_l(klt,:))
+          T_left_bottom = ppm_eval(PiL(k_sublayer+1), ppoly_r_coeffs_l(klb,:))
+        endif
         T_left_layer = ppm_ave(PiL(k_sublayer), PiL(k_sublayer+1) + real(klb-klt), &
                                aL_l(klt), aR_l(klt), Tl(klt))
 
         krb = KoR(k_sublayer+1)
-        T_right_bottom = ( 1. - PiR(k_sublayer+1) ) * Tir(krb) + PiR(k_sublayer+1) * Tir(krb+1)
         krt = KoR(k_sublayer)
-        T_right_top = ( 1. - PiR(k_sublayer) ) * Tir(krt) + PiR(k_sublayer) * Tir(krt+1)
+        if (lin_gradient) then
+          T_right_top = ( 1. - PiR(k_sublayer) ) * Tir(krt) + PiR(k_sublayer) * Tir(krt+1)
+          T_right_bottom = ( 1. - PiR(k_sublayer+1) ) * Tir(krb) + PiR(k_sublayer+1) * Tir(krb+1)
+        else
+          T_right_top = ppm_eval(PiR(k_sublayer), ppoly_r_coeffs_r(krt,:))
+          T_right_bottom = ppm_eval(PiR(k_sublayer+1), ppoly_r_coeffs_r(krb,:))
+        endif
         T_right_layer = ppm_ave(PiR(k_sublayer), PiR(k_sublayer+1) + real(krb-krt), &
                                 aL_r(krt), aR_r(krt), Tr(krt))
       else ! Discontinuous reconstruction
@@ -1881,12 +1910,13 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
 end subroutine neutral_surface_flux
 
 !> Discontinuous PPM reconstructions of the left/right edge values within a cell
-subroutine ppm_left_right_edge_values(nk, Tl, Ti, aL, aR)
+subroutine ppm_left_right_edge_values(nk, Tl, Ti, aL, aR, ppoly_coefficients)
   integer,                    intent(in)    :: nk !< Number of levels
   real, dimension(nk),        intent(in)    :: Tl !< Layer tracer (conc, e.g. degC)
   real, dimension(nk+1),      intent(in)    :: Ti !< Interface tracer (conc, e.g. degC)
   real, dimension(nk),        intent(inout) :: aL !< Left edge value of tracer (conc, e.g. degC)
   real, dimension(nk),        intent(inout) :: aR !< Right edge value of tracer (conc, e.g. degC)
+  real, dimension(nk,3), optional, intent(inout) :: ppoly_coefficients !< Coefficients of the polynomial
 
   integer :: k
   ! Setup reconstruction edge values
@@ -1901,8 +1931,26 @@ subroutine ppm_left_right_edge_values(nk, Tl, Ti, aL, aR)
     elseif ( sign(3., aR(k) - aL(k)) * ( (Tl(k) - aL(k)) + (Tl(k) - aR(k))) < -abs(aR(k) - aL(k)) ) then
       aR(k) = Tl(k) + 2.0 * ( Tl(k) - aL(k) )
     endif
+
+    if (present(ppoly_coefficients)) then
+      ppoly_coefficients(k,1) = aL(k)
+      ppoly_coefficients(k,2) = 4.0 * ( Tl(k) - aL(k) ) + 2.0 * ( Tl(k) - aR(k) )
+      ppoly_coefficients(k,3) = 3.0 * ( ( aR(k) - Tl(k) ) + ( aL(k) - Tl(k) ) )
+    endif
+
   enddo
 end subroutine ppm_left_right_edge_values
+
+!> Evaluate PPM polynomial at a given location x using Horner's method
+real function ppm_eval(x, ppoly_coeffs)
+  real,               intent(in) :: x            !< Location of interpolation
+  real, dimension(3), intent(in) :: ppoly_coeffs !< Coefficients of the polynomial
+
+  ppm_eval = ppoly_coeffs(1)
+  ppm_eval = ppm_eval*x + ppoly_coeffs(2)
+  ppm_eval = ppm_eval*x + ppoly_coeffs(3)
+
+end function ppm_eval
 
 !> Returns true if unit tests of neutral_diffusion functions fail. Otherwise returns false.
 logical function neutral_diffusion_unit_tests(verbose)
