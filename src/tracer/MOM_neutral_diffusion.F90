@@ -87,7 +87,9 @@ end type neutral_diffusion_CS
 #include "version_variable.h"
 character(len=40)  :: mdl = "MOM_neutral_diffusion" ! module name
 
-logical :: debug_this_module = .false. ! If true, verbose output of find neutral position
+logical :: debug_this_module = .true. ! If true, verbose output of find neutral position
+logical :: check_monotonic_positions = .true.
+
 
 contains
 
@@ -1255,18 +1257,18 @@ subroutine find_neutral_surface_positions_discontinuous(nk, deg,                
       ! In the case of a layer being unstably stratified, may get a negative thickness. Set the previous position
       ! to the current location
       if (hL < 0.) then
+        PoL(k_surface-1) = PoL(k_surface) ; KoL(k_surface-1) = KoL(k_surface)
         if ( (KoL(k_surface)<maxK_left) .and. PoL(k_surface)==1.) then
           KoL(k_surface) = maxK_left ; PoL(k_surface) = 0.
         endif
-        PoL(k_surface-1) = PoL(k_surface) ; KoL(k_surface-1) = KoL(k_surface)
         ! Make sure that the right point across a continuity is chose
         hL = 0.
       endif
       if (hR < 0.) then
+        PoR(k_surface-1) = PoR(k_surface) ; KoR(k_surface-1) = KoR(k_surface)
         if ( (KoR(k_surface)<maxK_right) .and. PoR(k_surface)==1.) then
           KoR(k_surface) = maxK_right ; PoR(k_surface) = 0.
         endif
-        PoR(k_surface-1) = PoR(k_surface) ; KoR(k_surface-1) = KoR(k_surface)
         hR = 0.
       endif
       if ( hL + hR > 0.) then
@@ -1277,6 +1279,22 @@ subroutine find_neutral_surface_positions_discontinuous(nk, deg,                
     endif
 
   enddo neutral_surfaces
+
+  if (check_monotonic_positions) then
+    do k_surface=1,4*nk-1
+      if (absolute_position(nk,ns,Pres_l,KoL,PoL,k_surface)>absolute_position(nk,ns,Pres_l,KoL,PoL,k_surface+1)) then
+        call MOM_error(FATAL,"Neutral surfaces not monotonically increasing on left column")
+      endif
+
+      if (absolute_position(nk,ns,Pres_r,KoR,PoR,k_surface)>absolute_position(nk,ns,Pres_r,KoR,PoR,k_surface+1)) then
+        do kl_right = 1,4*nk
+          write(0,'(A,I3,X,A,I3,X,A,E12.6)') "k_surface: ", kl_right, "KoR: ", KoR(kl_right), "PoR: ", PoR(kl_right)
+        enddo
+        write(0,'(A,I3)') "Error at k_surface=", k_surface
+        call MOM_error(FATAL,"Neutral surfaces not monotonically increasing on right column")
+      endif
+    enddo
+  endif
 
 end subroutine find_neutral_surface_positions_discontinuous
 
