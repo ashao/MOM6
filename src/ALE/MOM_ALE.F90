@@ -7,7 +7,7 @@
 module MOM_ALE
 
 ! This file is part of MOM6. See LICENSE.md for the license.
-
+use MOM_checksums,        only : hchksum
 use MOM_debugging,        only : check_column_integrals
 use MOM_diag_mediator,    only : register_diag_field, post_data, diag_ctrl, time_type
 use MOM_diag_vkernels,    only : interpolate_column, reintegrate_column
@@ -518,7 +518,12 @@ subroutine ALE_offline_inputs(CS, G, GV, h, tv, Reg, uhtr, vhtr, Kd, debug)
   dzRegrid(:,:,:) = 0.0
   h_new(:,:,:) = 0.0
 
-  if (debug) call MOM_tracer_chkinv("Before ALE_offline_inputs", G, h, Reg%Tr, Reg%ntr)
+  if (debug) then
+    call hchksum(h, "h before ALE_remap_scalar", G%HI)
+    call hchksum(tv%T, "Temp before ALE_remap_scalar", G%HI)
+    call hchksum(tv%S, "Salt before ALE_remap_scalar", G%HI)
+    call MOM_tracer_chkinv("before ALE_offline_inputs", G, h_new, Reg%Tr, Reg%ntr)
+  endif
 
   ! Build new grid from the Zstar state onto the requested vertical coordinate. The new grid is stored
   ! in h_new. The old grid is h. Both are needed for the subsequent remapping of variables. Convective
@@ -558,7 +563,12 @@ subroutine ALE_offline_inputs(CS, G, GV, h, tv, Reg, uhtr, vhtr, Kd, debug)
   call ALE_remap_scalar(CS%remapCS, G, GV, nk, h, tv%T, h_new, tv%T)
   call ALE_remap_scalar(CS%remapCS, G, GV, nk, h, tv%S, h_new, tv%S)
 
-  if (debug) call MOM_tracer_chkinv("After ALE_offline_inputs", G, h_new, Reg%Tr, Reg%ntr)
+  if (debug) then
+    call hchksum(h, "h after ALE_offline_inputs", G%HI)
+    call hchksum(tv%T, "Temp after ALE_offline_inputs", G%HI)
+    call hchksum(tv%S, "Salt after ALE_offline_inputs", G%HI)
+    call MOM_tracer_chkinv("after ALE_offline_inputs", G, h_new, Reg%Tr, Reg%ntr)
+  endif
 
   ! Copy over the new layer thicknesses
   do k = 1,nk  ; do j = jsc-1,jec+1 ; do i = isc-1,iec+1

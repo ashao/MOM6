@@ -1320,7 +1320,7 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
     uhtr_lin, vhtr_lin, &
     uhtr_res, vhtr_res, &
     eatr, ebtr,         &
-    h_end
+    h_pre, h_end
 
   ! 2D Array for diagnostics
   real, dimension(SZI_(CS%G),SZJ_(CS%G)) :: eta_pre, eta_end
@@ -1335,10 +1335,8 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
   nk = G%ke
 
   call cpu_clock_begin(id_clock_offline_tracer)
-  call extract_offline_main(CS%offline_CSp, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_end, &
-                            accumulated_time, dt_offline, dt_vertical, dt_horizontal, skip_diffusion)
-  Time_end = increment_date(Time_start, seconds=FLOOR(time_interval+EPSILON(time_interval)))
-  call enable_averaging(time_interval, Time_end, CS%diag)
+  call extract_offline_main(CS%offline_CSp, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_pre, &
+                            h_end, accumulated_time, dt_offline, dt_vertical, dt_horizontal, skip_diffusion)
 
   ! Check to see if this is the first iteration of the offline interval
   if(accumulated_time==0) then
@@ -1359,28 +1357,38 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
     ! perform the main advection.
     if (first_iter) then
       if(is_root_pe()) print *, "Reading in new offline fields"
+      Time_end = increment_date(Time_start, seconds=FLOOR(dt_offline+EPSILON(dt_offline)))
+      call enable_averaging(time_interval, Time_end, CS%diag)
       call update_offline_fields(CS%offline_CSp, CS%h, fluxes, CS%use_ALE_algorithm)
       ! Apply any fluxes into the ocean
       call offline_fw_fluxes_into_ocean(G, GV, CS%offline_CSp, fluxes, CS%h)
+      h_pre(:,:,:) = CS%h(:,:,:)
       uhtr_lin(:,:,:) = 0.
       vhtr_lin(:,:,:) = 0.
       uhtr_res(:,:,:) = 0.
       vhtr_res(:,:,:) = 0.
+      call disable_averaging(CS%diag)
     endif
 
     ! Diabatic first
     if (CS%diabatic_first .and. mod(accumulated_time, dt_vertical) == 0 ) then
-      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, CS%h)
+      Time_end = increment_date(Time_start, seconds=FLOOR(dt_vertical+EPSILON(dt_vertical)))
+      call enable_averaging(time_interval, Time_end, CS%diag)
+      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, h_pre, CS%h)
+      call disable_averaging(CS%diag)
     endif
     if (mod(accumulated_time, dt_horizontal) == 0) then
       if (is_root_pe()) print *, "Horizontal routines"
+      Time_end = increment_date(Time_start, seconds=FLOOR(dt_horizontal+EPSILON(dt_horizontal)))
+      call enable_averaging(time_interval, Time_end, CS%diag)
+      h_pre(:,:,:) = CS%h(:,:,:)
       ! Scale mass fluxes back
       do k=1,nk ; do j=js,je ; do i=is,ie
         uhtr_lin(i,j,k) = uhtr(i,j,k)*(dt_horizontal/dt_offline)
         vhtr_lin(i,j,k) = vhtr(i,j,k)*(dt_horizontal/dt_offline)
       enddo ; enddo ; enddo
       call offline_advection_ale(fluxes, Time_start, dt_horizontal, CS%offline_CSp, id_clock_ALE, &
-          CS%h, uhtr_lin, vhtr_lin, converged=adv_converged)
+                                 CS%h, uhtr_lin, vhtr_lin, converged=adv_converged)
       ! Store the amount of remaining residual transport
       do k=1,nk ; do j=js,je ; do i=is,ie
         uhtr_res(i,j,k) = uhtr_res(i,j,k) + uhtr_lin(i,j,k)
@@ -1395,15 +1403,21 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
         endif
         call tracer_hordiff(CS%h, dt_horizontal, CS%MEKE, CS%VarMix, G, GV, CS%tracer_diff_CSp, CS%tracer_Reg, CS%tv)
       endif
+      call disable_averaging(CS%diag)
     endif
     ! Not diabatic first
     if (.not. CS%diabatic_first .and. mod(accumulated_time, dt_vertical) == 0 ) then
-      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, CS%h)
+      Time_end = increment_date(Time_start, seconds=FLOOR(dt_vertical+EPSILON(dt_vertical)))
+      call enable_averaging(time_interval, Time_end, CS%diag)
+      call offline_diabatic_ale(fluxes, dt_vertical, CS%offline_CSp, h_pre, CS%h)
+      call disable_averaging(CS%diag)
     endif
 
     ! Last thing that needs to be done is the final ALE remapping
     if(last_iter) then
       if(is_root_pe()) print *, "Last iteration of offline interval"
+      Time_end = increment_date(Time_start, seconds=FLOOR(dt_offline+EPSILON(dt_offline)))
+      call enable_averaging(time_interval, Time_end, CS%diag)
       ! Redistribute any remaining transport
       call offline_redistribute_residual(CS%offline_CSp, CS%h, uhtr_res, vhtr_res, adv_converged)
       ! Apply freshwater fluxes out of the ocean
@@ -1417,6 +1431,7 @@ subroutine step_offline(fluxes, state, Time_start, time_interval, CS)
       call ALE_offline_tracer_final( G, GV, CS%h, CS%tv, h_end, CS%tracer_Reg, CS%ALE_CSp)
       call cpu_clock_end(id_clock_ALE)
       call pass_var(CS%h, G%Domain)
+      call disable_averaging(CS%diag)
     endif
   else ! NON-ALE MODE...NOT WELL TESTED
     call MOM_error(WARNING, &

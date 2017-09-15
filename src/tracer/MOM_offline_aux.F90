@@ -656,10 +656,9 @@ subroutine update_offline_from_files(G, GV, nk_input, mean_file, sum_file, snap_
   ! Check if reading vertical diffusivities or entrainment fluxes
   call read_data( mean_file, 'Kd_interface', Kd(:,:,1:nk_input+1), domain=G%Domain%mpp_domain, &
                   timelevel=ridx_sum,position=CENTER)
-  do k = nk_input+1,nz ; do j=js,je ; do i=is,ie
+  do k = nk_input+1,nz+1 ; do j=js,je ; do i=is,ie
     Kd(i,j,k) = Kd(i,j,nk_input+1)
   enddo ; enddo ; enddo
-
   ! This block makes sure that the fluxes control structure, which may not be used in the solo_driver,
   ! contains netMassIn and netMassOut which is necessary for the applyTracerBoundaryFluxesInOut routine
   if (do_ale) then

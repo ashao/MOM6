@@ -12,6 +12,7 @@ use MOM_diabatic_aux,         only : diabatic_aux_CS
 use MOM_diabatic_driver,      only : diabatic_CS, extract_diabatic_member
 use MOM_diabatic_aux,         only : tridiagTS
 use MOM_diag_mediator,        only : diag_ctrl, post_data, register_diag_field
+use MOM_diag_vkernels,        only : interpolate_column
 use MOM_domains,              only : sum_across_PEs, pass_var, pass_vector
 use MOM_error_handler,        only : MOM_error, FATAL, WARNING, is_root_pe
 use MOM_error_handler,        only : callTree_enter, callTree_leave
@@ -103,6 +104,7 @@ type, public :: offline_transport_CS ; private
                                                 !! follow freshwater fluxes
   real :: Kd_max        !< Runtime parameter specifying the maximum value of vertical diffusivity
   real :: min_residual  !< The minimum amount of total mass flux before exiting the main advection routine
+  real :: min_thickness
   !> Diagnostic manager IDs for some fields that may be of interest when doing offline transport
   integer :: &
     id_uhr = -1, &
@@ -147,6 +149,7 @@ type, public :: offline_transport_CS ; private
                    !! one time step  (m for Bouss, kg/m^2 for non-Bouss)
   ! Fields at T-points on interfaces
   real, allocatable, dimension(:,:,:) :: Kd     !< Vertical diffusivity
+  real, allocatable, dimension(:,:,:) :: h_pre  !< Thicknesses before an advective step is done
   real, allocatable, dimension(:,:,:) :: h_end  !< Thicknesses at the end of offline timestep
 
   real, allocatable, dimension(:,:) :: netMassIn  !< Freshwater fluxes into the ocean
@@ -822,12 +825,13 @@ end function remaining_transport_sum
 !> The vertical/diabatic driver for offline tracers. First the eatr/ebtr associated with the interpolated
 !! vertical diffusivities are calculated and then any tracer column functions are done which can include
 !! vertical diffuvities and source/sink terms.
-subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
+subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre, h_new)
 
   type(forcing),    intent(inout)      :: fluxes        !< pointers to forcing fields
-  real,             intent(in)         :: dt_vertical       !< starting time of a segment, as a time type
+  real,             intent(in)         :: dt_vertical   !< starting time of a segment, as a time type
   type(offline_transport_CS), pointer  :: CS            !< control structure from initialize_MOM
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(inout) :: h_pre
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(in) :: h_pre
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)), intent(in) :: h_new
   real, dimension(SZI_(CS%G),SZJ_(CS%G))    :: sw, sw_vis, sw_nir !< Save old value of shortwave radiation
 
   real :: hval
@@ -837,8 +841,18 @@ subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
   real :: stock_values(MAX_FIELDS_)
   real :: Kd_bot
   integer :: nstocks
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: eatr !< Entrainment from layer above
-  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: ebtr !< Entrainment from layer below
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: ea, eatr !< Entrainment from layer above
+  real, dimension(SZI_(CS%G),SZJ_(CS%G),SZK_(CS%G)) :: eb, ebtr !< Entrainment from layer below
+  logical :: in_boundary(SZI_(CS%G))
+  real :: htot(SZIB_(CS%G))
+  real :: add_ent
+  real :: h_neglect, h_neglect2
+  real :: Tr_ea_BBL, Kd_min_tr
+  real :: h_sum
+  real :: tr_sum(CS%tracer_reg%ntr)
+  integer :: k_max, tr
+  h_neglect = CS%GV%H_subroundoff
+
   nz = CS%GV%ke
   is = CS%G%isc ; ie = CS%G%iec ; js = CS%G%jsc ; je = CS%G%jec
 
@@ -851,28 +865,107 @@ subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
     call MOM_tracer_chkinv("Before offline_diabatic_ale", CS%G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
   endif
 
+  do j = js,je ; do i=is,ie
+    if (CS%G%mask2dT(i,j)>0.) then
+      call interpolate_column(nz, h_pre(i,j,:), CS%Kd(i,j,:), nz, h_new(i,j,:), 0., CS%Kd(i,j,:))
+    endif
+  enddo ; enddo;
+
   eatr(:,:,:) = 0.
   ebtr(:,:,:) = 0.
+  ea(:,:,:) = 0.
+  eb(:,:,:) = 0.
   ! Calculate eatr and ebtr if vertical diffusivity is read
   do j=js,je ; do i=is,ie
-    eatr(i,j,1) = 0.
+    ea(i,j,1) = 0.
   enddo ; enddo
   do k=2,nz ; do j=js,je ; do i=is,ie
-    hval=1.0/(CS%GV%H_subroundoff + 0.5*(h_pre(i,j,k-1) + h_pre(i,j,k)))
-    eatr(i,j,k) = (CS%GV%m_to_H**2) * dt_vertical * hval * CS%Kd(i,j,k)
-    ebtr(i,j,k-1) = eatr(i,j,k)
+    hval=1.0/(h_neglect + 0.5*(h_new(i,j,k-1) + h_new(i,j,k)))
+    ea(i,j,k) = (CS%GV%m_to_H**2) * dt_vertical * hval * CS%Kd(i,j,k)
+    eb(i,j,k-1) = ea(i,j,k)
   enddo ; enddo ; enddo
   do j=js,je ; do i=is,ie
-    ebtr(i,j,nz) = 0.
+    eb(i,j,nz) = 0.
   enddo ; enddo
+
+  h_neglect2 = h_neglect*h_neglect
+  Kd_min_tr = 2.0e-6
+  Tr_ea_BBL = 0.
+  do j=js,je
+    do i=is,ie
+      ebtr(i,j,nz) = eb(i,j,nz)
+      htot(i) = 0.0
+      in_boundary(i) = (CS%G%mask2dT(i,j) > 0.0)
+    enddo
+    do k=nz,2,-1 ; do i=is,ie
+      if (in_boundary(i)) then
+        htot(i) = htot(i) + h_new(i,j,k)
+        !   If diapycnal mixing has been suppressed because this is a massless
+        ! layer near the bottom, add some mixing of tracers between these
+        ! layers.  This flux is based on the harmonic mean of the two
+        ! thicknesses, as this corresponds pretty closely (to within
+        ! differences in the density jumps between layers) with what is done
+        ! in the calculation of the fluxes in the first place.  Kd_min_tr
+        ! should be much less than the values that have been set in Kd,
+        ! perhaps a molecular diffusivity.
+        add_ent = ((dt_vertical * Kd_min_tr) * CS%GV%m_to_H**2) * &
+                  ((h_new(i,j,k-1)+h_new(i,j,k)+h_neglect) / &
+                   (h_new(i,j,k-1)*h_new(i,j,k)+h_neglect2)) - &
+                  0.5*(ea(i,j,k) + eb(i,j,k-1))
+        if (htot(i) < Tr_ea_BBL) then
+          add_ent = max(0.0, add_ent, &
+                        (Tr_ea_BBL - htot(i)) - min(ea(i,j,k),eb(i,j,k-1)))
+        elseif (add_ent < 0.0) then
+          add_ent = 0.0 ; in_boundary(i) = .false.
+        endif
+        ebtr(i,j,k-1) = eb(i,j,k-1) + add_ent
+        eatr(i,j,k) = ea(i,j,k) + add_ent
+      else
+        ebtr(i,j,k-1) = eb(i,j,k-1) ; eatr(i,j,k) = ea(i,j,k)
+      endif
+    enddo ; enddo
+    do i=is,ie ; eatr(i,j,1) = ea(i,j,1) ; enddo
+  enddo
 
   if (associated(CS%optics)) &
     call set_opacity(CS%optics, fluxes, CS%G, CS%GV, CS%opacity_CSp)
 
   ! Note that tracerBoundaryFluxesInOut within this subroutine should NOT be called
   ! as the freshwater fluxes have already been accounted for
-  call call_tracer_column_fns(h_pre, h_pre, eatr, ebtr, fluxes, CS%MLD, dt_vertical, CS%G, CS%GV, &
-                              CS%tv, CS%optics, CS%tracer_flow_CSp, CS%debug)
+  if (CS%debug) then
+    call hchksum(h_new,"h_new before offline_diabatic_ale",CS%G%HI)
+    call hchksum(eatr,"eatr before offline_diabatic_ale",CS%G%HI)
+    call hchksum(ebtr,"ebtr before offline_diabatic_ale",CS%G%HI)
+  endif
+  call call_tracer_column_fns(h_new, h_new, eatr, ebtr, fluxes, CS%MLD, dt_vertical, CS%G, CS%GV, &
+                        CS%tv, CS%optics, CS%tracer_flow_CSp, CS%debug)
+
+!  ! Manually mix "vanished" layers
+!  do j=js,je ; do i=is,ie
+!
+!    if (CS%G%mask2dT(i,j) > 0.0) then
+!      h_sum = 0.
+!      tr_sum(:) = 0.
+!      ! Find the index of the deepest, non-vanished layer
+!      do k = nz,1,-1
+!        if (h_new(i,j,k) > 2.*CS%min_thickness) then
+!          k_max = max(k-2,1)
+!          exit
+!        endif
+!      enddo
+!      do k=k_max,nz
+!        h_sum = h_sum + h_new(i,j,k)
+!        do tr=1,CS%tracer_reg%ntr
+!          tr_sum(tr) = tr_sum(tr) + CS%tracer_reg%Tr(tr)%t(i,j,k)*h_new(i,j,k)
+!        enddo
+!      enddo
+!      do k=k_max,nz
+!        do tr=1,CS%tracer_reg%ntr
+!          CS%tracer_reg%Tr(tr)%t(i,j,k) = tr_sum(tr) / (h_sum + h_neglect)
+!        enddo
+!      enddo
+!    endif
+!  enddo ; enddo
 
   if (CS%diurnal_SW .and. CS%read_sw) then
     fluxes%sw(:,:) = sw
@@ -881,9 +974,6 @@ subroutine offline_diabatic_ale(fluxes, dt_vertical, CS, h_pre)
   endif
 
   if (CS%debug) then
-    call hchksum(h_pre,"h_pre after offline_diabatic_ale",CS%G%HI)
-    call hchksum(eatr,"eatr after offline_diabatic_ale",CS%G%HI)
-    call hchksum(ebtr,"ebtr after offline_diabatic_ale",CS%G%HI)
     call MOM_tracer_chkinv("After offline_diabatic_ale", CS%G, h_pre, CS%tracer_reg%Tr, CS%tracer_reg%ntr)
   endif
 
@@ -1153,6 +1243,10 @@ subroutine update_offline_fields(CS, h, fluxes, do_ale)
   call cpu_clock_begin(CS%id_clock_read_fields)
   call callTree_enter("update_offline_fields, MOM_offline_main.F90")
 
+  if (CS%debug) then
+    call hchksum(CS%tv%T, "Temp before update_offline_fields", CS%G%HI)
+    call hchksum(CS%tv%S, "Salt before update_offline_fields", CS%G%HI)
+  endif
   ! Most fields will be read in from files
   call update_offline_from_files( CS%G, CS%GV, CS%nk_input, CS%mean_file, CS%sum_file, CS%snap_file, CS%surf_file,    &
                                   CS%h_end, CS%uhtr, CS%vhtr, CS%tv%T, CS%tv%S, CS%mld, CS%Kd, fluxes,                &
@@ -1321,7 +1415,7 @@ end subroutine post_offline_convergence_diags
 
 !> Extracts members of the offline main control structure. All arguments are optional except
 !! the control structure itself
-subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_end, &
+subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vhtr_res, eatr, ebtr, h_pre, h_end, &
                                 accumulated_time, dt_offline, dt_vertical, dt_horizontal, skip_diffusion)
   type(offline_transport_CS), target, intent(in   )  :: CS !< Offline control structure
   ! Returned optional arguments
@@ -1333,6 +1427,7 @@ subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vh
   real, dimension(:,:,:), pointer, optional, intent(  out) :: vhtr_res
   real, dimension(:,:,:), pointer, optional, intent(  out) :: eatr
   real, dimension(:,:,:), pointer, optional, intent(  out) :: ebtr
+  real, dimension(:,:,:), pointer, optional, intent(  out) :: h_pre
   real, dimension(:,:,:), pointer, optional, intent(  out) :: h_end
   real,                   pointer, optional, intent(  out) :: accumulated_time
   real,                            optional, intent(  out) :: dt_offline
@@ -1350,6 +1445,7 @@ subroutine extract_offline_main(CS, uhtr, vhtr, uhtr_lin, vhtr_lin, uhtr_res, vh
   if (present(eatr)) eatr => CS%eatr
   if (present(ebtr)) ebtr => CS%ebtr
   if (present(h_end)) h_end => CS%h_end
+  if (present(h_pre)) h_pre => CS%h_pre
 
   ! Pointers to integer members which need to be modified
   if (present(accumulated_time)) accumulated_time => CS%accumulated_time
@@ -1503,6 +1599,7 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
     "and will make initialization very slow. However, for offline\n"//      &
     "runs spanning more than a year this can reduce total I/O overhead",    &
     default = .false.)
+  call get_param(param_file, mdl, "MIN_THICKNESS", CS%min_thickness, do_not_log=.true.)
 
   ! Concatenate offline directory and file names
   CS%snap_file = trim(CS%offlinedir)//trim(CS%snap_file)
@@ -1553,6 +1650,7 @@ subroutine offline_transport_init(param_file, CS, diabatic_CSp, G, GV)
   allocate(CS%vhtr_res(isd:ied,JsdB:JedB,nz))   ; CS%vhtr_res(:,:,:) = 0.0
   allocate(CS%eatr(isd:ied,jsd:jed,nz))          ; CS%eatr(:,:,:) = 0.0
   allocate(CS%ebtr(isd:ied,jsd:jed,nz))          ; CS%ebtr(:,:,:) = 0.0
+  allocate(CS%h_pre(isd:ied,jsd:jed,nz))         ; CS%h_pre(:,:,:) = 0.0
   allocate(CS%h_end(isd:ied,jsd:jed,nz))         ; CS%h_end(:,:,:) = 0.0
   allocate(CS%netMassOut(G%isd:G%ied,G%jsd:G%jed)) ; CS%netMassOut(:,:) = 0.0
   allocate(CS%netMassIn(G%isd:G%ied,G%jsd:G%jed))  ; CS%netMassIn(:,:) = 0.0
