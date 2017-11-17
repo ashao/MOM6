@@ -1038,7 +1038,7 @@ subroutine step_MOM_tracer_dyn(CS, G, GV, h, h_pre_dyn, T_pre_dyn, S_pre_dyn, &
   call cpu_clock_end(id_clock_tracer) ; call cpu_clock_end(id_clock_thermo)
 
   call cpu_clock_begin(id_clock_other) ; call cpu_clock_begin(id_clock_diagnostics)
-  call post_transport_diagnostics(G, GV, CS, CS%diag, CS%t_dyn_rel_adv, h, &
+  call post_transport_diagnostics(G, GV, CS, CS%diag, CS%t_dyn_rel_adv, tv%C_p, h, &
                                   h_pre_dyn, T_pre_dyn, S_pre_dyn)
   ! Rebuild the remap grids now that we've posted the fields which rely on thicknesses
   ! from before the dynamics calls
@@ -2712,12 +2712,13 @@ end subroutine MOM_timing_init
 
 !> This routine posts diagnostics of the transports, including the subgridscale
 !! contributions.
-subroutine post_transport_diagnostics(G, GV, CS, diag, dt_trans, h, h_pre_dyn, T_pre_dyn, S_pre_dyn)
+subroutine post_transport_diagnostics(G, GV, CS, diag, dt_trans, C_p, h, h_pre_dyn, T_pre_dyn, S_pre_dyn)
   type(ocean_grid_type),    intent(inout) :: G   !< ocean grid structure
   type(verticalGrid_type),  intent(in)    :: GV  !< ocean vertical grid structure
   type(MOM_control_struct), intent(in)    :: CS  !< control structure
   type(diag_ctrl),          intent(inout) :: diag !< regulates diagnostic output
-  real                    , intent(in)    :: dt_trans !< total time step associated with the transports, in s.
+  real,                     intent(in)    :: dt_trans !< total time step associated with the transports, in s.
+  real,                     intent(in)    :: C_p !< Heat capacity of water for tendency calculation
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)), &
                             intent(in)    :: h   !< The updated layer thicknesses, in H
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)), &
@@ -2731,7 +2732,10 @@ subroutine post_transport_diagnostics(G, GV, CS, diag, dt_trans, h, h_pre_dyn, T
   real, dimension(SZI_(G), SZJB_(G)) :: vmo2d ! Diagnostics of integrated mass transport, in kg s-1
   real, dimension(SZIB_(G), SZJ_(G), SZK_(G)) :: umo ! Diagnostics of layer mass transport, in kg s-1
   real, dimension(SZI_(G), SZJB_(G), SZK_(G)) :: vmo ! Diagnostics of layer mass transport, in kg s-1
+  real :: work3d(SZI_(G),SZJ_(G),SZK_(G))
+  real :: work2d(SZI_(G),SZJ_(G))
   real :: H_to_kg_m2_dt   ! A conversion factor from accumulated transports to fluxes, in kg m-2 H-1 s-1.
+  real :: ppt2mks
   integer :: i, j, k, is, ie, js, je, nz
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = G%ke
 
@@ -2740,7 +2744,69 @@ subroutine post_transport_diagnostics(G, GV, CS, diag, dt_trans, h, h_pre_dyn, T
                              CS%diag_to_Z_CSp)
   call cpu_clock_end(id_clock_Z_diag)
 
-  ! Post mass transports, including SGS
+  ppt2mks       = 0.001
+  work3d(:,:,:) = 0.0
+  work2d(:,:)   = 0.0
+
+  ! These diagnostics need to be posted on the current grid
+  ! Post advective/diffusive heat tendencies
+  if (CS%id_Tadx   > 0) call post_data(CS%id_Tadx,   CS%T_adx,   diag)
+  if (CS%id_Tady   > 0) call post_data(CS%id_Tady,   CS%T_ady,   diag)
+  if (CS%id_Tdiffx > 0) call post_data(CS%id_Tdiffx, CS%T_diffx, diag)
+  if (CS%id_Tdiffy > 0) call post_data(CS%id_Tdiffy, CS%T_diffy, diag)
+
+  if (CS%id_Sadx   > 0) call post_data(CS%id_Sadx,   CS%S_adx,   diag)
+  if (CS%id_Sady   > 0) call post_data(CS%id_Sady,   CS%S_ady,   diag)
+  if (CS%id_Sdiffx > 0) call post_data(CS%id_Sdiffx, CS%S_diffx, diag)
+  if (CS%id_Sdiffy > 0) call post_data(CS%id_Sdiffy, CS%S_diffy, diag)
+
+  if (CS%id_Tadx_2d   > 0) call post_data(CS%id_Tadx_2d,   CS%T_adx_2d,   diag)
+  if (CS%id_Tady_2d   > 0) call post_data(CS%id_Tady_2d,   CS%T_ady_2d,   diag)
+  if (CS%id_Tdiffx_2d > 0) call post_data(CS%id_Tdiffx_2d, CS%T_diffx_2d, diag)
+  if (CS%id_Tdiffy_2d > 0) call post_data(CS%id_Tdiffy_2d, CS%T_diffy_2d, diag)
+
+  if (CS%id_Sadx_2d   > 0) call post_data(CS%id_Sadx_2d,   CS%S_adx_2d,   diag)
+  if (CS%id_Sady_2d   > 0) call post_data(CS%id_Sady_2d,   CS%S_ady_2d,   diag)
+  if (CS%id_Sdiffx_2d > 0) call post_data(CS%id_Sdiffx_2d, CS%S_diffx_2d, diag)
+  if (CS%id_Sdiffy_2d > 0) call post_data(CS%id_Sdiffy_2d, CS%S_diffy_2d, diag)
+
+  ! Diagnose tendency of heat from convergence of lateral advective,
+  ! fluxes, where advective transport arises from residual mean velocity.
+  if (CS%id_T_advection_xy > 0 .or. CS%id_T_advection_xy_2d > 0) then
+    do k=1,nz ; do j=js,je ; do i=is,ie
+      work3d(i,j,k) = CS%T_advection_xy(i,j,k) * GV%H_to_kg_m2 * C_p
+    enddo ; enddo ; enddo
+    if (CS%id_T_advection_xy    > 0) call post_data(CS%id_T_advection_xy, work3d, diag)
+    if (CS%id_T_advection_xy_2d > 0) then
+      do j=js,je ; do i=is,ie
+        work2d(i,j) = 0.0
+        do k=1,nz
+          work2d(i,j) = work2d(i,j) + work3d(i,j,k)
+        enddo
+      enddo ; enddo
+      call post_data(CS%id_T_advection_xy_2d, work2d, diag)
+    endif
+  endif
+
+  ! Diagnose tendency of salt from convergence of lateral advective
+  ! fluxes, where advective transport arises from residual mean velocity.
+  if (CS%id_S_advection_xy > 0 .or. CS%id_S_advection_xy_2d > 0) then
+    do k=1,nz ; do j=js,je ; do i=is,ie
+      work3d(i,j,k) = CS%S_advection_xy(i,j,k) * GV%H_to_kg_m2 * ppt2mks
+    enddo ; enddo ; enddo
+    if (CS%id_S_advection_xy    > 0) call post_data(CS%id_S_advection_xy, work3d, diag)
+    if (CS%id_S_advection_xy_2d > 0) then
+      do j=js,je ; do i=is,ie
+        work2d(i,j) = 0.0
+        do k=1,nz
+          work2d(i,j) = work2d(i,j) + work3d(i,j,k)
+        enddo
+      enddo ; enddo
+      call post_data(CS%id_S_advection_xy_2d, work2d, diag)
+    endif
+  endif
+
+  ! Post mass transports, including SGS, these need diagnostics need to be posted on the pre-dynamics grid
   ! Build the remap grids using the layer thicknesses from before the dynamics
   call diag_update_remap_grids(diag, alt_h = h_pre_dyn, alt_T = T_pre_dyn, alt_S = S_pre_dyn)
 
@@ -2819,27 +2885,6 @@ subroutine post_TS_diagnostics(CS, G, GV, tv, diag, dt)
     if (CS%id_sob > 0) call post_data(CS%id_sob, pracSal(:,:,G%ke), diag, mask=G%mask2dT)
   endif
 
-  if (CS%id_Tadx   > 0) call post_data(CS%id_Tadx,   CS%T_adx,   diag)
-  if (CS%id_Tady   > 0) call post_data(CS%id_Tady,   CS%T_ady,   diag)
-  if (CS%id_Tdiffx > 0) call post_data(CS%id_Tdiffx, CS%T_diffx, diag)
-  if (CS%id_Tdiffy > 0) call post_data(CS%id_Tdiffy, CS%T_diffy, diag)
-
-  if (CS%id_Sadx   > 0) call post_data(CS%id_Sadx,   CS%S_adx,   diag)
-  if (CS%id_Sady   > 0) call post_data(CS%id_Sady,   CS%S_ady,   diag)
-  if (CS%id_Sdiffx > 0) call post_data(CS%id_Sdiffx, CS%S_diffx, diag)
-  if (CS%id_Sdiffy > 0) call post_data(CS%id_Sdiffy, CS%S_diffy, diag)
-
-  if (CS%id_Tadx_2d   > 0) call post_data(CS%id_Tadx_2d,   CS%T_adx_2d,   diag)
-  if (CS%id_Tady_2d   > 0) call post_data(CS%id_Tady_2d,   CS%T_ady_2d,   diag)
-  if (CS%id_Tdiffx_2d > 0) call post_data(CS%id_Tdiffx_2d, CS%T_diffx_2d, diag)
-  if (CS%id_Tdiffy_2d > 0) call post_data(CS%id_Tdiffy_2d, CS%T_diffy_2d, diag)
-
-  if (CS%id_Sadx_2d   > 0) call post_data(CS%id_Sadx_2d,   CS%S_adx_2d,   diag)
-  if (CS%id_Sady_2d   > 0) call post_data(CS%id_Sady_2d,   CS%S_ady_2d,   diag)
-  if (CS%id_Sdiffx_2d > 0) call post_data(CS%id_Sdiffx_2d, CS%S_diffx_2d, diag)
-  if (CS%id_Sdiffy_2d > 0) call post_data(CS%id_Sdiffy_2d, CS%S_diffy_2d, diag)
-
-  if(.not. CS%tendency_diagnostics) return
 
   Idt = 0.; if (dt/=0.) Idt = 1.0 / dt ! The "if" is in case the diagnostic is called for a zero length interval
   ppt2mks       = 0.001
