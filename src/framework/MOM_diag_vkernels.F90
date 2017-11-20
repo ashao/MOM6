@@ -145,7 +145,7 @@ subroutine reintegrate_column(nsrc, h_src, uh_src, ndest, h_dest, missing_value,
     elseif (h_src_rem>h_dest_rem) then
       ! Only part of the source cell can be used up
       dh = h_dest_rem
-      duh = (dh / h_src_rem) * uh_src_rem
+      duh = (dh/h_src(k_src))*uh_src(k_src)
       h_src_rem = max(0., h_src_rem - dh)
       uh_src_rem = uh_src_rem - duh
       h_dest_rem = 0.
