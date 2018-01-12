@@ -45,6 +45,7 @@ type, public :: neutral_diffusion_CS ; private
   logical :: continuous_reconstruction = .true.   ! True if using continuous PPM reconstruction at interfaces
   logical :: refine_position = .false.
   logical :: debug
+  logical :: ts_limiter ! If true, limit both T and S flux if one is limited
   integer :: max_iter ! Maximum number of iterations if refine_position is defined
   real :: tolerance   ! Convergence criterion representing difference from true neutrality
   real :: ref_pres    ! Reference pressure, negative if using locally referenced neutral density
@@ -185,7 +186,10 @@ logical function neutral_diffusion_init(Time, G, param_file, diag, EOS, CS)
                      default=10)
       call set_ndiff_aux_params(CS%ndiff_aux_CS, max_iter = max_iter, drho_tol = drho_tol, xtol = xtol)
     endif
-    call get_param(param_file, mdl, "NDIFF_DEBUG", CS%debug,             &
+    call get_param(param_file, mdl, "NDIFF_TS_LIMITER", CS%ts_limiter,        &
+                   "Limit both T and S flux if one is limited.",                    &
+                   default = .false.)
+    call get_param(param_file, mdl, "NDIFF_DEBUG", CS%debug,                     &
                    "Turns on verbose output for discontinuous neutral \n"//      &
                    "diffusion routines.", &
                    default = .false.)
@@ -549,26 +553,29 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, CS)
 end subroutine neutral_diffusion_calc_coeffs
 
 !> Update tracer concentration due to neutral diffusion; layer thickness unchanged by this update.
-subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer, m, dt, name, CS)
+subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, m, dt, CS)
   type(ocean_grid_type),                     intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV     !< ocean vertical grid structure
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(in)    :: h      !< Layer thickness (H units)
   real, dimension(SZIB_(G),SZJ_(G)),         intent(in)    :: Coef_x !< dt * Kh * dy / dx at u-points (m^2)
   real, dimension(SZI_(G),SZJB_(G)),         intent(in)    :: Coef_y !< dt * Kh * dx / dy at u-points (m^2)
-  real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(inout) :: Tracer !< Tracer concentration
-  integer,                                   intent(in)    :: m      !< Tracer number
+  type(tracer_registry_type),                intent(inout) :: Tracer_reg !< registered tracers
   real,                                      intent(in)    :: dt     !< Tracer time step * I_numitts (I_numitts in tracer_hordiff)
-  character(len=32),                         intent(in)    :: name   !< Tracer name
   type(neutral_diffusion_CS),                pointer       :: CS     !< Neutral diffusion control structure
 
   ! Local variables
   real, dimension(SZIB_(G),SZJ_(G),CS%nsurf-1) :: uFlx        ! Zonal flux of tracer      (concentration * H)
   real, dimension(SZI_(G),SZJB_(G),CS%nsurf-1) :: vFlx        ! Meridional flux of tracer (concentration * H)
+  real, dimension(SZIB_(G),SZJ_(G),CS%nsurf-1) :: uFlx_save   ! Zonal flux of tracer      (concentration * H)
+  real, dimension(SZI_(G),SZJB_(G),CS%nsurf-1) :: vFlx_save   ! Meridional flux of tracer (concentration * H)
   real, dimension(SZI_(G),SZJ_(G),G%ke)        :: tendency    ! tendency array for diagn
   real, dimension(SZI_(G),SZJ_(G))             :: tendency_2d ! depth integrated content tendency for diagn
   real, dimension(SZIB_(G),SZJ_(G))            :: trans_x_2d  ! depth integrated diffusive tracer x-transport diagn
   real, dimension(SZI_(G),SZJB_(G))            :: trans_y_2d  ! depth integrated diffusive tracer y-transport diagn
   real, dimension(G%ke)                        :: dTracer     ! change in tracer concentration due to ndiffusion
+  character(len=32),                           :: name        ! Tracer name
+  real, pointer, dimension(SZI_(G),SZJ_(G),SZK_(G)) :: Tracer !< Tracer concentration
+  integer :: m
   integer :: i, j, k, ks, nk
   real :: ppt2mks, Idt, convert
   real :: h_neglect, h_neglect_edge
@@ -578,138 +585,140 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer, m, dt, name, CS)
   h_neglect = GV%m_to_H*1.0e-30
 
   nk = GV%ke
-
-  ! for diagnostics
-  if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
-     CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
-     CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0  .or.  &
-     CS%id_neutral_diff_tracer_trans_x_2d(m)   > 0  .or.  &
-     CS%id_neutral_diff_tracer_trans_y_2d(m)   > 0) then
-     ppt2mks          = 0.001
-     Idt              = 1.0/dt
-     tendency(:,:,:)  = 0.0
-     tendency_2d(:,:) = 0.0
-     trans_x_2d(:,:)  = 0.0
-     trans_y_2d(:,:)  = 0.0
-     convert          = 1.0
-     if(trim(name) == 'T') convert = CS%C_p  * GV%H_to_kg_m2
-     if(trim(name) == 'S') convert = ppt2mks * GV%H_to_kg_m2
-  endif
-
-  uFlx(:,:,:) = 0.
-  vFlx(:,:,:) = 0.
-
-  ! x-flux
-  do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
-    if (G%mask2dCu(I,j)>0.) then
-      call neutral_surface_flux(nk, CS%nsurf, CS%deg, h(i,j,:), h(i+1,j,:),       &
-                                Tracer(i,j,:), Tracer(i+1,j,:), &
-                                CS%uPoL(I,j,:), CS%uPoR(I,j,:), &
-                                CS%uKoL(I,j,:), CS%uKoR(I,j,:), &
-                                CS%uhEff(I,j,:), uFlx(I,j,:), &
-                                CS%continuous_reconstruction, h_neglect, CS%remap_CS, h_neglect_edge)
+  do m = 1,Tracer_reg%ntr
+    Tracer => Tracer_reg%Tr(m)%t
+    name = Tracer_reg%Tr(m)%name
+    ! for diagnostics
+    if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
+       CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
+       CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0  .or.  &
+       CS%id_neutral_diff_tracer_trans_x_2d(m)   > 0  .or.  &
+       CS%id_neutral_diff_tracer_trans_y_2d(m)   > 0) then
+       ppt2mks          = 0.001
+       Idt              = 1.0/dt
+       tendency(:,:,:)  = 0.0
+       tendency_2d(:,:) = 0.0
+       trans_x_2d(:,:)  = 0.0
+       trans_y_2d(:,:)  = 0.0
+       convert          = 1.0
+       if(trim(name) == 'T') convert = CS%C_p  * GV%H_to_kg_m2
+       if(trim(name) == 'S') convert = ppt2mks * GV%H_to_kg_m2
     endif
-  enddo ; enddo
 
-  ! y-flux
-  do J = G%jsc-1,G%jec ; do i = G%isc,G%iec
-    if (G%mask2dCv(i,J)>0.) then
-      call neutral_surface_flux(nk, CS%nsurf, CS%deg, h(i,j,:), h(i,j+1,:),       &
-                                Tracer(i,j,:), Tracer(i,j+1,:), &
-                                CS%vPoL(i,J,:), CS%vPoR(i,J,:), &
-                                CS%vKoL(i,J,:), CS%vKoR(i,J,:), &
-                                CS%vhEff(i,J,:), vFlx(i,J,:),   &
-                                CS%continuous_reconstruction, h_neglect, CS%remap_CS, h_neglect_edge)
-    endif
-  enddo ; enddo
+    uFlx(:,:,:) = 0.
+    vFlx(:,:,:) = 0.
 
-  ! Update the tracer concentration from divergence of neutral diffusive flux components
-  do j = G%jsc,G%jec ; do i = G%isc,G%iec
-    if (G%mask2dT(i,j)>0.) then
-
-      dTracer(:) = 0.
-      do ks = 1,CS%nsurf-1 ;
-        k = CS%uKoL(I,j,ks)
-        dTracer(k) = dTracer(k) + Coef_x(I,j)   * uFlx(I,j,ks)
-        k = CS%uKoR(I-1,j,ks)
-        dTracer(k) = dTracer(k) - Coef_x(I-1,j) * uFlx(I-1,j,ks)
-        k = CS%vKoL(i,J,ks)
-        dTracer(k) = dTracer(k) + Coef_y(i,J)   * vFlx(i,J,ks)
-        k = CS%vKoR(i,J-1,ks)
-        dTracer(k) = dTracer(k) - Coef_y(i,J-1) * vFlx(i,J-1,ks)
-      enddo
-      do k = 1, GV%ke
-        Tracer(i,j,k) = Tracer(i,j,k) + dTracer(k) * &
-                        ( G%IareaT(i,j) / ( h(i,j,k) + GV%H_subroundoff ) )
-      enddo
-
-      if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
-         CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
-         CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0 ) then
-        do k = 1, GV%ke
-          tendency(i,j,k) = dTracer(k) * G%IareaT(i,j) * Idt
-        enddo
-      endif
-
-    endif
-  enddo ; enddo
-
-
-  ! Diagnose vertically summed zonal flux, giving zonal tracer transport from ndiff.
-  ! Note sign corresponds to downgradient flux convention.
-  if(CS%id_neutral_diff_tracer_trans_x_2d(m) > 0) then
+    ! x-flux
     do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
-      trans_x_2d(I,j) = 0.
       if (G%mask2dCu(I,j)>0.) then
-        do ks = 1,CS%nsurf-1 ;
-          trans_x_2d(I,j) = trans_x_2d(I,j) - Coef_x(I,j) * uFlx(I,j,ks)
-        enddo
-        trans_x_2d(I,j) = trans_x_2d(I,j) * Idt * convert
+        call neutral_surface_flux(nk, CS%nsurf, CS%deg, h(i,j,:), h(i+1,j,:),       &
+                                  Tracer(i,j,:), Tracer(i+1,j,:), &
+                                  CS%uPoL(I,j,:), CS%uPoR(I,j,:), &
+                                  CS%uKoL(I,j,:), CS%uKoR(I,j,:), &
+                                  CS%uhEff(I,j,:), uFlx(I,j,:), &
+                                  CS%continuous_reconstruction, h_neglect, CS%remap_CS, h_neglect_edge)
       endif
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_trans_x_2d(m), trans_x_2d(:,:), CS%diag)
-  endif
 
-  ! Diagnose vertically summed merid flux, giving meridional tracer transport from ndiff.
-  ! Note sign corresponds to downgradient flux convention.
-  if(CS%id_neutral_diff_tracer_trans_y_2d(m) > 0) then
+    ! y-flux
     do J = G%jsc-1,G%jec ; do i = G%isc,G%iec
-      trans_y_2d(i,J) = 0.
       if (G%mask2dCv(i,J)>0.) then
-        do ks = 1,CS%nsurf-1 ;
-          trans_y_2d(i,J) = trans_y_2d(i,J) - Coef_y(i,J) * vFlx(i,J,ks)
-        enddo
-        trans_y_2d(i,J) = trans_y_2d(i,J) * Idt * convert
+        call neutral_surface_flux(nk, CS%nsurf, CS%deg, h(i,j,:), h(i,j+1,:),       &
+                                  Tracer(i,j,:), Tracer(i,j+1,:), &
+                                  CS%vPoL(i,J,:), CS%vPoR(i,J,:), &
+                                  CS%vKoL(i,J,:), CS%vKoR(i,J,:), &
+                                  CS%vhEff(i,J,:), vFlx(i,J,:),   &
+                                  CS%continuous_reconstruction, h_neglect, CS%remap_CS, h_neglect_edge)
       endif
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_trans_y_2d(m), trans_y_2d(:,:), CS%diag)
-  endif
 
-  ! post tendency of tracer content
-  if(CS%id_neutral_diff_tracer_cont_tend(m) > 0) then
-    call post_data(CS%id_neutral_diff_tracer_cont_tend(m), tendency(:,:,:)*convert, CS%diag)
-  endif
-
-  ! post depth summed tendency for tracer content
-  if(CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0) then
+    ! Update the tracer concentration from divergence of neutral diffusive flux components
     do j = G%jsc,G%jec ; do i = G%isc,G%iec
-      do k = 1, GV%ke
-        tendency_2d(i,j) = tendency_2d(i,j) + tendency(i,j,k)
-      enddo
+      if (G%mask2dT(i,j)>0.) then
+
+        dTracer(:) = 0.
+        do ks = 1,CS%nsurf-1 ;
+          k = CS%uKoL(I,j,ks)
+          dTracer(k) = dTracer(k) + Coef_x(I,j)   * uFlx(I,j,ks)
+          k = CS%uKoR(I-1,j,ks)
+          dTracer(k) = dTracer(k) - Coef_x(I-1,j) * uFlx(I-1,j,ks)
+          k = CS%vKoL(i,J,ks)
+          dTracer(k) = dTracer(k) + Coef_y(i,J)   * vFlx(i,J,ks)
+          k = CS%vKoR(i,J-1,ks)
+          dTracer(k) = dTracer(k) - Coef_y(i,J-1) * vFlx(i,J-1,ks)
+        enddo
+        do k = 1, GV%ke
+          Tracer(i,j,k) = Tracer(i,j,k) + dTracer(k) * &
+                          ( G%IareaT(i,j) / ( h(i,j,k) + GV%H_subroundoff ) )
+        enddo
+
+        if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
+           CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
+           CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0 ) then
+          do k = 1, GV%ke
+            tendency(i,j,k) = dTracer(k) * G%IareaT(i,j) * Idt
+          enddo
+        endif
+
+      endif
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_cont_tend_2d(m), tendency_2d(:,:)*convert, CS%diag)
-  endif
 
-  ! post tendency of tracer concentration; this step must be
-  ! done after posting tracer content tendency, since we alter
-  ! the tendency array.
-  if(CS%id_neutral_diff_tracer_conc_tend(m) > 0) then
-    do k = 1, GV%ke ; do j = G%jsc,G%jec ; do i = G%isc,G%iec
-      tendency(i,j,k) =  tendency(i,j,k) / ( h(i,j,k) + GV%H_subroundoff )
-    enddo ; enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_conc_tend(m), tendency, CS%diag)
-  endif
 
+    ! Diagnose vertically summed zonal flux, giving zonal tracer transport from ndiff.
+    ! Note sign corresponds to downgradient flux convention.
+    if(CS%id_neutral_diff_tracer_trans_x_2d(m) > 0) then
+      do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
+        trans_x_2d(I,j) = 0.
+        if (G%mask2dCu(I,j)>0.) then
+          do ks = 1,CS%nsurf-1 ;
+            trans_x_2d(I,j) = trans_x_2d(I,j) - Coef_x(I,j) * uFlx(I,j,ks)
+          enddo
+          trans_x_2d(I,j) = trans_x_2d(I,j) * Idt * convert
+        endif
+      enddo ; enddo
+      call post_data(CS%id_neutral_diff_tracer_trans_x_2d(m), trans_x_2d(:,:), CS%diag)
+    endif
+
+    ! Diagnose vertically summed merid flux, giving meridional tracer transport from ndiff.
+    ! Note sign corresponds to downgradient flux convention.
+    if(CS%id_neutral_diff_tracer_trans_y_2d(m) > 0) then
+      do J = G%jsc-1,G%jec ; do i = G%isc,G%iec
+        trans_y_2d(i,J) = 0.
+        if (G%mask2dCv(i,J)>0.) then
+          do ks = 1,CS%nsurf-1 ;
+            trans_y_2d(i,J) = trans_y_2d(i,J) - Coef_y(i,J) * vFlx(i,J,ks)
+          enddo
+          trans_y_2d(i,J) = trans_y_2d(i,J) * Idt * convert
+        endif
+      enddo ; enddo
+      call post_data(CS%id_neutral_diff_tracer_trans_y_2d(m), trans_y_2d(:,:), CS%diag)
+    endif
+
+    ! post tendency of tracer content
+    if(CS%id_neutral_diff_tracer_cont_tend(m) > 0) then
+      call post_data(CS%id_neutral_diff_tracer_cont_tend(m), tendency(:,:,:)*convert, CS%diag)
+    endif
+
+    ! post depth summed tendency for tracer content
+    if(CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0) then
+      do j = G%jsc,G%jec ; do i = G%isc,G%iec
+        do k = 1, GV%ke
+          tendency_2d(i,j) = tendency_2d(i,j) + tendency(i,j,k)
+        enddo
+      enddo ; enddo
+      call post_data(CS%id_neutral_diff_tracer_cont_tend_2d(m), tendency_2d(:,:)*convert, CS%diag)
+    endif
+
+    ! post tendency of tracer concentration; this step must be
+    ! done after posting tracer content tendency, since we alter
+    ! the tendency array.
+    if(CS%id_neutral_diff_tracer_conc_tend(m) > 0) then
+      do k = 1, GV%ke ; do j = G%jsc,G%jec ; do i = G%isc,G%iec
+        tendency(i,j,k) =  tendency(i,j,k) / ( h(i,j,k) + GV%H_subroundoff )
+      enddo ; enddo ; enddo
+      call post_data(CS%id_neutral_diff_tracer_conc_tend(m), tendency, CS%diag)
+    endif
+  enddo ! Loop over tracer registry
 
 end subroutine neutral_diffusion
 
@@ -1459,7 +1468,8 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
                                              !! for the purpose of edge value calculations
                                              !! in the same units as h0.
   ! Local variables
-  integer :: k_sublayer, klb, klt, krb, krt, k
+  integer :: k_sublayer, klb, klt, krb, krt, k, kl, kr, k_first, k_last
+  real :: sub_sum
   real :: T_right_top, T_right_bottom, T_right_layer, T_right_sub, T_right_top_int, T_right_bot_int
   real :: T_left_top, T_left_bottom, T_left_layer, T_left_sub, T_left_top_int, T_left_bot_int
   real :: dT_top, dT_bottom, dT_layer, dT_ave, dT_sublayer, dT_top_int, dT_bot_int
@@ -1536,9 +1546,6 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
         dT_sublayer = T_right_sub     - T_left_sub
         dT_top_int  = T_right_top_int - T_left_top_int
         dT_bot_int  = T_right_bot_int - T_left_bot_int
-        ! Enforcing the below criterion incorrectly zero out fluxes
-        !dT_layer = T_right_layer - T_left_layer
-
         down_flux = dT_top <= 0. .and. dT_bottom <= 0. .and.       &
                     dT_sublayer <= 0. .and. dT_top_int <= 0. .and. &
                     dT_bot_int <= 0.
@@ -1555,6 +1562,37 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
     endif
   enddo
 
+  ! Need to check that the total sum of sublayer fluxes match the overall gradient of the layer fluxes
+  if (.not. continuous) then
+    kl = KoL(1)
+    kr = KoR(1)
+    k_first = 1
+    sub_sum = 0.
+    do k_sublayer = 1,nsurf-1
+      ! Only count sublayers which correspond with the same two layer pairs
+      if ( (kl == KoL(k_sublayer)) .and. (kr == KoR(k_sublayer)) ) then
+        sub_sum = sub_sum + Flx(k_sublayer)
+        k_last = k_sublayer
+      ! If either, the main layer on the right or left have changed, then all the fluxes of the sublayers between the previous pairs
+      ! have been counted
+      else
+        ! Check sign of the last super cell pair (kl and kr still refer to the last pair)
+        dT_layer = Tr(kr) - Tl(kl)
+        ! Zero out fluxes in sublayers if the sum of the fluxes goes against the supercell gradient
+        ! Note that unlike the other gradients, the sublayer fluxes are considered antidiffusive if the supercell gradient is 0
+        if (signum(1.,sub_sum)*signum(1.,dT_layer)<=0.) then
+          do k = k_first,k_last
+            Flx(k) = 0.
+          enddo
+        endif
+        ! Reset all quantities to prepare for the next layer pairs
+        sub_sum = Flx(k_sublayer)
+        kl = KoL(k_sublayer)
+        kr = KoR(k_sublayer)
+        k_first = k_sublayer
+      endif
+    enddo
+  endif
 end subroutine neutral_surface_flux
 
 !> Evaluate various parts of the reconstructions to calculate gradient-based flux limter

@@ -349,7 +349,7 @@ subroutine tracer_hordiff(h, dt, MEKE, VarMix, G, GV, CS, Reg, tv, do_online_fla
         call do_group_pass(CS%pass_t, G%Domain, clock=id_clock_pass)
       endif
       do m=1,ntr ! for each tracer
-         call neutral_diffusion(G, GV,  h, Coef_x, Coef_y, Reg%Tr(m)%t, m, I_numitts*dt, &
+         call neutral_diffusion(G, GV,  h, Coef_x, Coef_y, Reg, I_numitts*dt, &
                                 Reg%Tr(m)%name, CS%neutral_diffusion_CSp)
       enddo
     enddo ! itt
