@@ -348,10 +348,7 @@ subroutine tracer_hordiff(h, dt, MEKE, VarMix, G, GV, CS, Reg, tv, do_online_fla
       if (itt>1) then ! Update halos for subsequent iterations
         call do_group_pass(CS%pass_t, G%Domain, clock=id_clock_pass)
       endif
-      do m=1,ntr ! for each tracer
-         call neutral_diffusion(G, GV,  h, Coef_x, Coef_y, Reg, I_numitts*dt, &
-                                Reg%Tr(m)%name, CS%neutral_diffusion_CSp)
-      enddo
+      call neutral_diffusion(G, GV,  h, Coef_x, Coef_y, Reg, I_numitts*dt, CS%neutral_diffusion_CSp)
     enddo ! itt
 
   else    ! following if not using neutral diffusion, but instead along-surface diffusion
