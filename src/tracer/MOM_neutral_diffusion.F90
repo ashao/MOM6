@@ -85,6 +85,8 @@ type, public :: neutral_diffusion_CS ; private
   integer, allocatable, dimension(:) :: id_neutral_diff_tracer_cont_tend_2d ! k-summed tracer content tendency
   integer, allocatable, dimension(:) :: id_neutral_diff_tracer_trans_x_2d   ! k-summed ndiff zonal tracer transport
   integer, allocatable, dimension(:) :: id_neutral_diff_tracer_trans_y_2d   ! k-summed ndiff merid tracer transport
+  integer :: id_ndiff_buoyancy_change_T = -1
+  integer :: id_ndiff_buoyancy_change_S = -1
   integer :: id_uhEff_2d = -1
   integer :: id_vhEff_2d = -1
 
@@ -305,6 +307,11 @@ subroutine neutral_diffusion_diag_init(Time, G, diag, C_p, Reg, CS)
       'Depth integrated neutral diffusion merid tracer transport for '//trim(Reg%Tr(n)%name),&
       'W')
 
+      CS%id_ndiff_buoyancy_change_T = register_diag_field('ocean_model',  &
+      'ndiff_buoyancy_change_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,      &
+      'Change in density due to convergence of neutral diffusive fluxes for '//trim(Reg%Tr(n)%name),&
+      'kg m-3')
+
     elseif(trim(Reg%Tr(n)%name) == 'S') then
 
       CS%id_neutral_diff_tracer_conc_tend(n) = register_diag_field('ocean_model',  &
@@ -340,6 +347,11 @@ subroutine neutral_diffusion_diag_init(Time, G, diag, C_p, Reg, CS)
       'ndiff_tracer_trans_y_2d_'//trim(Reg%Tr(n)%name), diag%axesCv1, Time,                  &
       'Depth integrated neutral diffusion merid tracer transport for '//trim(Reg%Tr(n)%name),&
       'kg s-1')
+
+      CS%id_ndiff_buoyancy_change_S = register_diag_field('ocean_model',  &
+      'ndiff_buoyancy_change_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,      &
+      'Change in density due to convergence of neutral diffusive fluxes for '//trim(Reg%Tr(n)%name),&
+      'kg m-3')
 
     else
 
@@ -577,8 +589,13 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
   real, dimension(SZI_(G),SZJB_(G),CS%nsurf-1) :: S_vFlx      ! Meridional flux of tracer (concentration * H)
   logical, dimension(SZIB_(G),SZJ_(G),CS%nsurf-1) :: uFlx_limited ! Zonal flux of tracer      (concentration * H)
   logical, dimension(SZI_(G),SZJB_(G),CS%nsurf-1) :: vFlx_limited ! Meridional flux of tracer (concentration * H)
+
+
   character(len=32)                            :: name        ! Tracer name
-  real, pointer, dimension(:,:,:) :: Tracer !< Tracer concentration
+  real, pointer, dimension(:,:,:)              :: Tracer      ! Pointer to tracer arrays
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G))     :: dRdS        ! Change in density wrt to salinity
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G))     :: dRdT        ! Change in density wrt to temperature
+  real, dimension(SZK_(G))                     :: Pmid        ! Pressure at midpoint of a cell
   integer :: m
   integer :: i, j, k, ks, nk
   integer :: T_idx, S_idx
@@ -648,7 +665,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
       endif
     endif
 
-  enddo ! Loop over tracer registry
+  enddo ! First loop over registry for T and S
 
   ! Now do T and S fluxes, but if requested apply the colimiter first
   if (CS%colimit_TS) then
@@ -665,14 +682,36 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
       endif
     enddo ; enddo ; enddo
   endif
+
+  ! Calculate density deriviatives if buoyancy change diagnostics are requested
+  if (CS%id_ndiff_buoyancy_change_T > 0 .or. CS%id_ndiff_buoyancy_change_S) then
+    dRdS(:,:,:) = 0.
+    dRdT(:,:,:) = 0.
+    do j = G%jsc,G%jec ; do i = G%isc,G%iec
+      if (G%mask2dT(i,j)>0.) then
+        ! Set pressure to either local pressure or a reference pressure
+        if (CS%ref_pres < 0) then
+          do k = 1, nk
+            Pmid(k) = 0.5*(CS%Pint(i,j,k) + CS%Pint(i,j,k+1))
+          enddo
+        else
+          Pmid(:) = CS%ref_pres
+        endif
+        Tracer => Tracer_reg%Tr(m)%t
+        call calculate_density_derivs(Tracer_reg%Tr(T_idx)%t(i,j,:), Tracer_reg%Tr(S_idx)%t(i,j,:), Pmid, &
+                                      dRdT(i,j,:), dRdS(i,j,:), 1, nk, CS%EOS)
+      endif
+    enddo ; enddo;
+  endif
+
   ! Apply T flux
   name = 'T'
   Tracer => Tracer_reg%Tr(T_idx)%t
-  call apply_ndiff_flux(CS, G, GV, T_idx, dt, h, Coef_x, Coef_y, T_uFlx, T_vFlx, Tracer, name)
+  call apply_ndiff_flux(CS, G, GV, T_idx, dt, h, Coef_x, Coef_y, T_uFlx, T_vFlx, Tracer, name, rho_deriv = dRdT)
   ! Apply S flux
   name = 'S'
   Tracer => Tracer_reg%Tr(S_idx)%t
-  call apply_ndiff_flux(CS, G, GV, S_idx, dt, h, Coef_x, Coef_y, S_uFlx, S_vFlx, Tracer, name)
+  call apply_ndiff_flux(CS, G, GV, S_idx, dt, h, Coef_x, Coef_y, S_uFlx, S_vFlx, Tracer, name, rho_deriv = dRdS)
 
   ! Now do the passive tracers and apply colimiter if requested
   do m = 1,Tracer_reg%ntr
@@ -720,7 +759,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
 end subroutine neutral_diffusion
 
 !> Update the tracer concentration from divergence of neutral diffusive flux components
-subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tracer, name)
+subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tracer, name, rho_deriv)
   type(neutral_diffusion_CS),                        pointer    :: CS     !< Neutral diffusion control structure
   type(ocean_grid_type),                             intent(in) :: G      !< Ocean grid structure
   type(verticalGrid_type),                           intent(in) :: GV     !< ocean vertical grid structure
@@ -733,14 +772,18 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
   real, dimension(SZI_(G),SZJB_(G),CS%nsurf-1),      intent(in) :: vFlx   !< Meridional flux of tracer (concentration * H)
   real, dimension(:,:,:),                            pointer    :: Tracer !< Tracer concentration
   character(len=32),                                 intent(in) :: name   ! Tracer name
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)), optional,intent(in) :: rho_deriv
 
+  ! Other diagnostic arrays
   real, dimension(SZI_(G),SZJ_(G),G%ke)        :: tendency    ! tendency array for diagn
   real, dimension(SZI_(G),SZJ_(G))             :: tendency_2d ! depth integrated content tendency for diagn
   real, dimension(SZIB_(G),SZJ_(G))            :: trans_x_2d  ! depth integrated diffusive tracer x-transport diagn
   real, dimension(SZI_(G),SZJB_(G))            :: trans_y_2d  ! depth integrated diffusive tracer y-transport diagn
   real, dimension(G%ke)                        :: dTracer     ! change in tracer concentration due to ndiffusion
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G))     :: buoy_change   ! Layer thickness (H units)
   real :: ppt2mks, Idt, convert
   integer :: i, j, k, ks, nk
+  logical :: calc_buoy_change
 
   ! for diagnostics
   if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
@@ -758,6 +801,10 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
      if(trim(name) == 'T') convert = CS%C_p  * GV%H_to_kg_m2
      if(trim(name) == 'S') convert = ppt2mks * GV%H_to_kg_m2
   endif
+
+  calc_buoy_change = ( (CS%id_ndiff_buoyancy_change_S > 0) .and. (trim(name) == 'S') ) .or. &
+                     ( (CS%id_ndiff_buoyancy_change_T > 0) .and. (trim(name) == 'T') )
+  if (calc_buoy_change) buoy_change(:,:,:) = 0.
 
   do j = G%jsc,G%jec ; do i = G%isc,G%iec
     if (G%mask2dT(i,j)>0.) then
@@ -777,6 +824,13 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
         Tracer(i,j,k) = Tracer(i,j,k) + dTracer(k) * &
                         ( G%IareaT(i,j) / ( h(i,j,k) + GV%H_subroundoff ) )
       enddo
+
+      ! Calculate change in density due to the change in T or S
+      if (calc_buoy_change) then
+        do k = 1, GV%ke
+          buoy_change(i,j,k) = rho_deriv(i,j,k) * (dTracer(k) * (G%IareaT(i,j) / (h(i,j,k) + GV%H_subroundoff)))
+        enddo
+      endif
 
       if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
          CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
@@ -842,7 +896,14 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
       tendency(i,j,k) =  tendency(i,j,k) / ( h(i,j,k) + GV%H_subroundoff )
     enddo ; enddo ; enddo
     call post_data(CS%id_neutral_diff_tracer_conc_tend(m), tendency, CS%diag)
-    endif
+  endif
+
+  if (calc_buoy_change) then
+    if (trim(name) == 'T' .and. CS%id_ndiff_buoyancy_change_T > 0) &
+      call post_data(CS%id_ndiff_buoyancy_change_T, buoy_change, CS%diag)
+    if (trim(name) == 'S' .and. CS%id_ndiff_buoyancy_change_S > 0) &
+      call post_data(CS%id_ndiff_buoyancy_change_S, buoy_change, CS%diag)
+  endif
 
 end subroutine apply_ndiff_flux
 
@@ -1484,7 +1545,7 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
     lastK_left = KoL(k_surface)  ; lastP_left = PoL(k_surface)
     lastK_right = KoR(k_surface) ; lastP_right = PoR(k_surface)
 
-    if (CS%debug)  write(*,'(A,I3,A,ES16.6,A,I2,A,ES16.6)') "KoL:", KoL(k_surface), " PoL:", PoL(k_surface), "     KoR:", &
+    if (CS%debug)  write(*,'(A,I4,A,ES16.6,A,I2,A,ES16.6)') "KoL:", KoL(k_surface), " PoL:", PoL(k_surface), "     KoR:", &
       KoR(k_surface), " PoR:", PoR(k_surface)
     ! Effective thickness
     if (k_surface>1) then
@@ -1509,18 +1570,19 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
     write (*,*) "==========Start Neutral Surfaces=========="
     do k = 1,ns-1
       if (hEff(k)>0.) then
-      kl_left = KoL(k)
-      kl_right = KoR(k)
-      write (*,'(A,I3,X,ES16.6,X,I3,X,ES16.6)') "Top surface KoL, PoL, KoR, PoR: ", kl_left, PoL(k), kl_right, PoR(k)
-      call check_neutral_positions(CS%ndiff_aux_CS, Pres_l(kl_left), Pres_l(kl_left+1), Pres_r(kl_right), &
-                                   Pres_r(kl_right+1), PoL(k), PoR(k), ppoly_T_l(kl_left,:), ppoly_T_r(kl_right,:), &
-                                   ppoly_S_l(kl_left,:), ppoly_S_r(kl_right,:))
-      kl_left = KoL(k+1)
-      kl_right = KoR(k+1)
-      write (*,'(A,I3,X,ES16.6,X,I3,X,ES16.6)') "Bot surface KoL, PoL, KoR, PoR: ", kl_left, PoL(k+1), kl_right, PoR(k)
-      call check_neutral_positions(CS%ndiff_aux_CS, Pres_l(kl_left), Pres_l(kl_left+1), Pres_r(kl_right), &
-                                   Pres_r(kl_right+1), PoL(k), PoR(k), ppoly_T_l(kl_left,:), ppoly_T_r(kl_right,:), &
-                                   ppoly_S_l(kl_left,:), ppoly_S_r(kl_right,:))
+        kl_left = KoL(k)
+        kl_right = KoR(k)
+        write (*,'(A,I4,A)') '--Layer ',k,'--'
+        write (*,'(A,I4,X,ES16.6,X,I3,X,ES16.6)') "Top surface KoL, PoL, KoR, PoR: ", kl_left, PoL(k), kl_right, PoR(k)
+        call check_neutral_positions(CS%ndiff_aux_CS, Pres_l(kl_left), Pres_l(kl_left+1), Pres_r(kl_right), &
+                                     Pres_r(kl_right+1), PoL(k), PoR(k), ppoly_T_l(kl_left,:), ppoly_T_r(kl_right,:), &
+                                     ppoly_S_l(kl_left,:), ppoly_S_r(kl_right,:))
+        kl_left = KoL(k+1)
+        kl_right = KoR(k+1)
+        write (*,'(A,I4,X,ES16.6,X,I3,X,ES16.6)') "Bot surface KoL, PoL, KoR, PoR: ", kl_left, PoL(k+1), kl_right, PoR(k)
+        call check_neutral_positions(CS%ndiff_aux_CS, Pres_l(kl_left), Pres_l(kl_left+1), Pres_r(kl_right), &
+                                     Pres_r(kl_right+1), PoL(k), PoR(k), ppoly_T_l(kl_left,:), ppoly_T_r(kl_right,:), &
+                                     ppoly_S_l(kl_left,:), ppoly_S_r(kl_right,:))
       endif
     enddo
     write(*,'(A,E16.6)') "Total thickness of sublayers: ", SUM(hEff)

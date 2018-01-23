@@ -647,6 +647,10 @@ subroutine check_neutral_positions(CS, Ptop_l, Pbot_l, Ptop_r, Pbot_r, PoL, PoR,
   delta_rho = 0.5*( (alpha_l + alpha_r)*(Tl - Tr) + (beta_l + beta_r)*(Sl - Sr) )
   write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho
 
+  if ( ABS(delta_rho) > CS%drho_tol) then
+    call MOM_error(FATAL, "Neutral diffusion: surface is not neutral within tolerance")
+  endif
+
 end subroutine check_neutral_positions
 
 !> Do a compensated sum to account for roundoff level
