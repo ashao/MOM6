@@ -203,7 +203,7 @@ contains
 !> RK2 splitting for time stepping MOM adiabatic dynamics
 subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
                  Time_local, dt, forces, p_surf_begin, p_surf_end, &
-                 dt_since_flux, dt_therm, uh, vh, uhtr, vhtr, eta_av, &
+                 uh, vh, uhtr, vhtr, eta_av, &
                  G, GV, CS, calc_dtbt, VarMix, MEKE)
   type(ocean_grid_type),                     intent(inout) :: G             !< ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV            !< ocean vertical grid structure
@@ -217,8 +217,6 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   type(mech_forcing),                        intent(in)    :: forces        !< A structure with the driving mechanical forces
   real, dimension(:,:),                      pointer       :: p_surf_begin  !< surf pressure at start of this dynamic time step (Pa)
   real, dimension(:,:),                      pointer       :: p_surf_end    !< surf pressure at end   of this dynamic time step (Pa)
-  real,                                      intent(in)    :: dt_since_flux !< elapsed time since fluxes were applied (sec)
-  real,                                      intent(in)    :: dt_therm      !< thermodynamic time step (sec)
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), target, intent(inout) :: uh    !< zonal volume/mass transport (m3/s or kg/s)
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), target, intent(inout) :: vh    !< merid volume/mass transport (m3/s or kg/s)
   real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(inout) :: uhtr          !< accumulatated zonal volume/mass transport since last tracer advection (m3 or kg)
@@ -326,10 +324,10 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   if (associated(CS%OBC)) then
     if (CS%debug_OBC) call open_boundary_test_extern_h(G, CS%OBC, h)
 
-    do k=1,nz ; do j=js-1,je+1 ; do I=is-2,ie+1
+    do k=1,nz ; do j=G%jsd,G%jed ; do I=G%IsdB,G%IedB
       u_old_rad_OBC(I,j,k) = u_av(I,j,k)
     enddo ; enddo ; enddo
-    do k=1,nz ; do J=js-2,je+1 ; do i=is-1,ie+1
+    do k=1,nz ; do J=G%JsdB,G%JedB ; do i=G%isd,G%ied
       v_old_rad_OBC(i,J,k) = v_av(i,J,k)
     enddo ; enddo ; enddo
   endif
@@ -463,8 +461,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   ! Calculate the relative layer weights for determining barotropic quantities.
   if (.not.BT_cont_BT_thick) &
     call btcalc(h, G, GV, CS%barotropic_CSp, OBC=CS%OBC)
-  call bt_mass_source(h, eta, forces, .true., dt_therm, dt_since_flux, &
-                      G, GV, CS%barotropic_CSp)
+  call bt_mass_source(h, eta, .true., G, GV, CS%barotropic_CSp)
   call cpu_clock_end(id_clock_btcalc)
 
   if (G%nonblocking_updates) &
@@ -603,8 +600,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, &
   ! hp can be changed if CS%begw /= 0.
   ! eta_cor = ...                 (hidden inside CS%barotropic_CSp)
   call cpu_clock_begin(id_clock_btcalc)
-  call bt_mass_source(hp, eta_pred, forces, .false., dt_therm, &
-                      dt_since_flux+dt, G, GV, CS%barotropic_CSp)
+  call bt_mass_source(hp, eta_pred, .false., G, GV, CS%barotropic_CSp)
   call cpu_clock_end(id_clock_btcalc)
 
   if (CS%begw /= 0.0) then
@@ -950,6 +946,7 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)) :: h_tmp
   character(len=40) :: mdl = "MOM_dynamics_split_RK2" ! This module's name.
   character(len=48) :: thickness_units, flux_units, eta_rest_name
+  real :: H_convert
   type(group_pass_type) :: pass_av_h_uvh
   logical :: use_tides, debug_truncations
 
@@ -1108,10 +1105,13 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, param_fil
   call cpu_clock_end(id_clock_pass_init)
 
   flux_units = get_flux_units(GV)
+  H_convert = GV%H_to_m ; if (.not.GV%Boussinesq) H_convert = GV%H_to_kg_m2
   CS%id_uh = register_diag_field('ocean_model', 'uh', diag%axesCuL, Time, &
-      'Zonal Thickness Flux', flux_units, y_cell_method='sum', v_extensive=.true.)
+      'Zonal Thickness Flux', flux_units, y_cell_method='sum', v_extensive=.true., &
+      conversion=H_convert)
   CS%id_vh = register_diag_field('ocean_model', 'vh', diag%axesCvL, Time, &
-      'Meridional Thickness Flux', flux_units, x_cell_method='sum', v_extensive=.true.)
+      'Meridional Thickness Flux', flux_units, x_cell_method='sum', v_extensive=.true., &
+      conversion=H_convert)
 
   CS%id_CAu = register_diag_field('ocean_model', 'CAu', diag%axesCuL, Time, &
       'Zonal Coriolis and Advective Acceleration', 'm s-2')

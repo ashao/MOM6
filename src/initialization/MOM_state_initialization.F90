@@ -17,13 +17,13 @@ use MOM_file_parser, only : log_version
 use MOM_get_input, only : directories
 use MOM_grid, only : ocean_grid_type, isPointInCell
 use MOM_interface_heights, only : find_eta
-use MOM_io, only : close_file, fieldtype, file_exists
-use MOM_io, only : open_file, MOM_read_data, MOM_read_vector, read_axis_data
-use MOM_io, only : slasher, vardesc, write_field
-use MOM_io, only : EAST_FACE, NORTH_FACE , SINGLE_FILE, MULTIPLE
+use MOM_io, only : file_exists
+use MOM_io, only : MOM_read_data, MOM_read_vector
+use MOM_io, only : slasher
 use MOM_open_boundary, only : ocean_OBC_type, open_boundary_init
 use MOM_open_boundary, only : OBC_NONE, OBC_SIMPLE
-use MOM_open_boundary, only : open_boundary_query, set_tracer_data
+use MOM_open_boundary, only : open_boundary_query
+use MOM_open_boundary, only : set_tracer_data
 use MOM_open_boundary, only : open_boundary_test_extern_h
 use MOM_open_boundary, only : fill_temp_salt_segments
 !use MOM_open_boundary, only : set_3D_OBC_data
@@ -35,7 +35,7 @@ use MOM_ALE_sponge, only : set_up_ALE_sponge_field, initialize_ALE_sponge
 use MOM_ALE_sponge, only : ALE_sponge_CS
 use MOM_string_functions, only : uppercase, lowercase
 use MOM_time_manager, only : time_type, set_time
-use MOM_tracer_registry, only : add_tracer_OBC_values, tracer_registry_type
+use MOM_tracer_registry, only : tracer_registry_type
 use MOM_variables, only : thermo_var_ptrs
 use MOM_verticalGrid, only : setVerticalGridAxes, verticalGrid_type
 use MOM_ALE, only : pressure_gradient_plm
@@ -67,6 +67,8 @@ use sloshing_initialization, only : sloshing_initialize_thickness
 use sloshing_initialization, only : sloshing_initialize_temperature_salinity
 use seamount_initialization, only : seamount_initialize_thickness
 use seamount_initialization, only : seamount_initialize_temperature_salinity
+use dumbbell_initialization, only : dumbbell_initialize_thickness
+use dumbbell_initialization, only : dumbbell_initialize_temperature_salinity
 use Phillips_initialization, only : Phillips_initialize_thickness
 use Phillips_initialization, only : Phillips_initialize_velocity
 use Phillips_initialization, only : Phillips_initialize_sponges
@@ -75,6 +77,7 @@ use Rossby_front_2d_initialization, only : Rossby_front_initialize_temperature_s
 use Rossby_front_2d_initialization, only : Rossby_front_initialize_velocity
 use SCM_idealized_hurricane, only : SCM_idealized_hurricane_TS_init
 use SCM_CVmix_tests, only: SCM_CVmix_tests_TS_init
+use dyed_channel_initialization, only : dyed_channel_set_OBC_tracer_data
 use dyed_obcs_initialization, only : dyed_obcs_set_OBC_data
 use supercritical_initialization, only : supercritical_set_OBC_data
 use soliton_initialization, only : soliton_initialize_velocity
@@ -82,6 +85,7 @@ use soliton_initialization, only : soliton_initialize_thickness
 use BFB_initialization, only : BFB_initialize_sponges_southonly
 use dense_water_initialization, only : dense_water_initialize_TS
 use dense_water_initialization, only : dense_water_initialize_sponges
+use dumbbell_initialization, only : dumbbell_initialize_sponges
 
 use midas_vertmap, only : find_interfaces, tracer_Z_init
 use midas_vertmap, only : determine_temperature
@@ -89,6 +93,7 @@ use midas_vertmap, only : determine_temperature
 use MOM_ALE, only : ALE_initRegridding, ALE_CS, ALE_initThicknessToCoord
 use MOM_ALE, only : ALE_remap_scalar, ALE_build_grid, ALE_regrid_accelerated
 use MOM_regridding, only : regridding_CS, set_regrid_params, getCoordinateResolution
+use MOM_regridding, only : regridding_main
 use MOM_remapping, only : remapping_CS, initialize_remapping
 use MOM_remapping, only : remapping_core_h
 use MOM_horizontal_regridding, only : horiz_interp_and_extrap_tracer
@@ -171,6 +176,8 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB
 
+  real :: dt
+
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = G%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
   isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
@@ -252,9 +259,10 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
              " \t\t densities. This is not yet implemented. \n"//&
              " \t circle_obcs - the circle_obcs test case is used. \n"//&
              " \t DOME2D - 2D version of DOME initialization. \n"//&
-             " \t adjustment2d - TBD AJA. \n"//&
-             " \t sloshing - TBD AJA. \n"//&
-             " \t seamount - TBD AJA. \n"//&
+             " \t adjustment2d - 2D lock exchange thickness ICs. \n"//&
+             " \t sloshing - sloshing gravity thickness ICs. \n"//&
+             " \t seamount - no motion test with seamount ICs. \n"//&
+             " \t dumbbell - sloshing channel ICs. \n"//&
              " \t soliton - Equatorial Rossby soliton. \n"//&
              " \t rossby_front - a mixed layer front in thermal wind balance.\n"//&
              " \t USER - call a user modified routine.", &
@@ -296,6 +304,8 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
                                    just_read_params=just_read)
        case ("seamount"); call seamount_initialize_thickness(h, G, GV, PF, &
                                    just_read_params=just_read)
+       case ("dumbbell"); call dumbbell_initialize_thickness(h, G, GV, PF, &
+                                   just_read_params=just_read)
        case ("soliton"); call soliton_initialize_thickness(h, G, GV)
        case ("phillips"); call Phillips_initialize_thickness(h, G, GV, PF, &
                                    just_read_params=just_read)
@@ -322,9 +332,10 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
              " \t linear - linear in logical layer space. \n"//&
              " \t DOME2D - 2D DOME initialization. \n"//&
              " \t ISOMIP - ISOMIP initialization. \n"//&
-             " \t adjustment2d - TBD AJA. \n"//&
-             " \t sloshing - TBD AJA. \n"//&
-             " \t seamount - TBD AJA. \n"//&
+             " \t adjustment2d - 2d lock exchange T/S ICs. \n"//&
+             " \t sloshing - sloshing mode T/S ICs. \n"//&
+             " \t seamount - no motion test with seamount ICs. \n"//&
+             " \t dumbbell - sloshing channel ICs. \n"//&
              " \t rossby_front - a mixed layer front in thermal wind balance.\n"//&
              " \t SCM_ideal_hurr - used in the SCM idealized hurricane test.\n"//&
              " \t SCM_CVmix_tests - used in the SCM CVmix tests.\n"//&
@@ -353,6 +364,8 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
         case ("sloshing"); call sloshing_initialize_temperature_salinity(tv%T, &
                                     tv%S, h, G, GV, PF, eos, just_read_params=just_read)
         case ("seamount"); call seamount_initialize_temperature_salinity(tv%T, &
+                                    tv%S, h, G, GV, PF, eos, just_read_params=just_read)
+        case ("dumbbell"); call dumbbell_initialize_temperature_salinity(tv%T, &
                                     tv%S, h, G, GV, PF, eos, just_read_params=just_read)
         case ("rossby_front"); call Rossby_front_initialize_temperature_salinity ( tv%T, &
                                         tv%S, h, G, GV, PF, eos, just_read_params=just_read)
@@ -454,8 +467,9 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
            "an initial grid that is consistent with the initial conditions.", &
            default=1, do_not_log=just_read)
 
-      if (new_sim) &
-        call ALE_regrid_accelerated(ALE_CSp, G, GV, h, tv, regrid_iterations, h, u, v)
+      call get_param(PF, mdl, "DT", dt, "Timestep", fail_if_missing=.true.)
+
+      call ALE_regrid_accelerated(ALE_CSp, G, GV, h, tv, regrid_iterations, u, v, tracer_Reg, dt=dt, initial=.true.)
     endif
   endif
   ! This is the end of the block of code that might have initialized fields
@@ -513,6 +527,8 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
                                                PF, sponge_CSp, h)
       case ("BFB"); call BFB_initialize_sponges_southonly(G, use_temperature, tv, &
                                                PF, sponge_CSp, h)
+      case ("DUMBBELL"); call dumbbell_initialize_sponges(G, GV, tv, &
+                                               PF, useALE, sponge_CSp, ALE_sponge_CSp)
       case ("phillips"); call Phillips_initialize_sponges(G, use_temperature, tv, &
                                                PF, sponge_CSp, h)
       case ("dense"); call dense_water_initialize_sponges(G, GV, tv, PF, useALE, &
@@ -533,6 +549,7 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
                  "A string that sets how the user code is invoked to set open\n"//&
                  " boundary data: \n"//&
                  "   DOME - specified inflow on northern boundary\n"//&
+                 "   dyed_channel - supercritical with dye on the inflow boundary\n"//&
                  "   dyed_obcs - circle_obcs with dyes on the open boundaries\n"//&
                  "   Kelvin - barotropic Kelvin wave forcing on the western boundary\n"//&
                  "   shelfwave - Flather with shelf wave forcing on western boundary\n"//&
@@ -541,6 +558,9 @@ subroutine MOM_initialize_state(u, v, h, tv, Time, G, GV, PF, dirs, &
                  "   USER - user specified", default="none")
     if (trim(config) == "DOME") then
       call DOME_set_OBC_data(OBC, tv, G, GV, PF, tracer_Reg)
+    elseif (trim(config) == "dyed_channel") then
+      call dyed_channel_set_OBC_tracer_data(OBC, G, GV, PF, tracer_Reg)
+      OBC%update_OBC = .true.
     elseif (trim(config) == "dyed_obcs") then
       call dyed_obcs_set_OBC_data(OBC, G, GV, PF, tracer_Reg)
     elseif (trim(config) == "Kelvin") then
@@ -1142,11 +1162,7 @@ subroutine trim_for_ice(PF, G, GV, ALE_CSp, tv, h, just_read_params)
 
   ! Find edge values of T and S used in reconstructions
   if ( associated(ALE_CSp) ) then ! This should only be associated if we are in ALE mode
-!   if ( PRScheme == PRESSURE_RECONSTRUCTION_PLM ) then
-      call pressure_gradient_plm(ALE_CSp, S_t, S_b, T_t, T_b, G, GV, tv, h)
-!   elseif ( PRScheme == PRESSURE_RECONSTRUCTION_PPM ) then
-!     call pressure_gradient_ppm(ALE_CSp, S_t, S_b, T_t, T_b, G, GV, tv, h)
-!   endif
+    call pressure_gradient_plm(ALE_CSp, S_t, S_b, T_t, T_b, G, GV, tv, h, .true.)
   else
 !    call MOM_error(FATAL, "trim_for_ice: Does not work without ALE mode")
     do k=1,G%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
@@ -1822,6 +1838,7 @@ subroutine initialize_sponges_file(G, GV, use_temperature, tv, param_file, CSp, 
 !  The first call to set_up_sponge_field is for the interface heights if in layered mode.!
 
   if (.not. use_ALE) then
+    allocate(eta(isd:ied,jsd:jed,nz+1))
     call MOM_read_data(filename, eta_var, eta(:,:,:), G%Domain)
 
     do j=js,je ; do i=is,ie
@@ -1834,6 +1851,7 @@ subroutine initialize_sponges_file(G, GV, use_temperature, tv, param_file, CSp, 
 ! Set the inverse damping rates so that the model will know where to !
 ! apply the sponges, along with the interface heights.               !
     call initialize_sponge(Idamp, eta, G, param_file, CSp)
+    deallocate(eta)
   else if (.not. new_sponges) then ! ALE mode
 
     call field_size(filename,eta_var,siz,no_domain=.true.)
@@ -1860,6 +1878,8 @@ subroutine initialize_sponges_file(G, GV, use_temperature, tv, param_file, CSp, 
       h(i,j,k) = eta(i,j,k)-eta(i,j,k+1)
     enddo ; enddo; enddo
     call initialize_ALE_sponge(Idamp, G, param_file, ALE_CSp, h, nz_data)
+    deallocate(eta)
+    deallocate(h)
   else
     ! Initialize sponges without supplying sponge grid
     call initialize_ALE_sponge(Idamp, G, param_file, ALE_CSp)
@@ -1986,6 +2006,8 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
   character(len=200) :: mesg, area_varname, ice_shelf_file
 
   type(EOS_type), pointer :: eos => NULL()
+  type(thermo_var_ptrs) :: tv_loc   ! A temporary thermo_var container
+  type(verticalGrid_type) :: GV_loc ! A temporary vertical grid structure
 
 ! This include declares and sets the variable "version".
 #include "version_variable.h"
@@ -2001,6 +2023,7 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
   integer :: nkml, nkbl         ! number of mixed and buffer layers
 
   integer :: kd, inconsistent
+  integer :: nkd ! number of levels to use for regridding input arrays
   real    :: PI_180             ! for conversion from degrees to radians
 
   real, dimension(:,:), pointer :: shelf_area
@@ -2031,9 +2054,11 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
   ! Local variables for ALE remapping
   real, dimension(:), allocatable :: hTarget
   real, dimension(:,:), allocatable :: area_shelf_h
-  real, dimension(:,:), allocatable, target  :: frac_shelf_h
-  real, dimension(:,:,:), allocatable :: tmpT1dIn, tmpS1dIn, tmp_mask_in
+  real, dimension(:,:), allocatable, target :: frac_shelf_h
+  real, dimension(:,:,:), allocatable, target :: tmpT1dIn, tmpS1dIn
+  real, dimension(:,:,:), allocatable :: tmp_mask_in
   real, dimension(:,:,:), allocatable :: h1 ! Thicknesses in H.
+  real, dimension(:,:,:), allocatable :: dz_interface ! Change in position of interface due to regridding
   real :: zTopOfCell, zBottomOfCell
   type(regridding_CS) :: regridCS ! Regridding parameters and work arrays
   type(remapping_CS) :: remapCS ! Remapping parameters and work arrays
@@ -2210,23 +2235,24 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
 ! Now remap to model coordinates
   if (useALEremapping) then
     call cpu_clock_begin(id_clock_ALE)
+    nkd = max(GV%ke, kd)
     ! The regridding tools (grid generation) are coded to work on model arrays of the same
     ! vertical shape. We need to re-write the regridding if the model has fewer layers
     ! than the data. -AJA
-    if (kd>nz) call MOM_error(FATAL,"MOM_initialize_state, MOM_temp_salt_initialize_from_Z(): "//&
-         "Data has more levels than the model - this has not been coded yet!")
+   !if (kd>nz) call MOM_error(FATAL,"MOM_initialize_state, MOM_temp_salt_initialize_from_Z(): "//&
+   !     "Data has more levels than the model - this has not been coded yet!")
     ! Build the source grid and copy data onto model-shaped arrays with vanished layers
-    allocate( tmp_mask_in(isd:ied,jsd:jed,nz) ) ; tmp_mask_in(:,:,:) = 0.
-    allocate( h1(isd:ied,jsd:jed,nz) ) ; h1(:,:,:) = 0.
-    allocate( tmpT1dIn(isd:ied,jsd:jed,nz) ) ; tmpT1dIn(:,:,:) = 0.
-    allocate( tmpS1dIn(isd:ied,jsd:jed,nz) ) ; tmpS1dIn(:,:,:) = 0.
+    allocate( tmp_mask_in(isd:ied,jsd:jed,nkd) ) ; tmp_mask_in(:,:,:) = 0.
+    allocate( h1(isd:ied,jsd:jed,nkd) ) ; h1(:,:,:) = 0.
+    allocate( tmpT1dIn(isd:ied,jsd:jed,nkd) ) ; tmpT1dIn(:,:,:) = 0.
+    allocate( tmpS1dIn(isd:ied,jsd:jed,nkd) ) ; tmpS1dIn(:,:,:) = 0.
     do j = js, je ; do i = is, ie
       if (G%mask2dT(i,j)>0.) then
-        zTopOfCell = 0. ; zBottomOfCell = 0. ; nPoints = 0
+        zTopOfCell = 0. ; zBottomOfCell = 0.
         tmp_mask_in(i,j,1:kd) = mask_z(i,j,:)
-        do k = 1, nz
+        do k = 1, nkd
           if (tmp_mask_in(i,j,k)>0. .and. k<=kd) then
-            zBottomOfCell = -min( z_edges_in(k+1), G%bathyT(i,j) )
+            zBottomOfCell = max( -z_edges_in(k+1), -G%bathyT(i,j) )
             tmpT1dIn(i,j,k) = temp_z(i,j,k)
             tmpS1dIn(i,j,k) = salt_z(i,j,k)
           elseif (k>1) then
@@ -2238,10 +2264,9 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
             tmpS1dIn(i,j,k) = -99.9
           endif
           h1(i,j,k) = GV%m_to_H * (zTopOfCell - zBottomOfCell)
-          if (h1(i,j,k)>0.) nPoints = nPoints + 1
           zTopOfCell = zBottomOfCell ! Bottom becomes top for next value of k
         enddo
-        h1(i,j,kd) = h1(i,j,kd) + GV%m_to_H * ( zTopOfCell + G%bathyT(i,j) ) ! In case data is deeper than model
+        h1(i,j,kd) = h1(i,j,kd) + GV%m_to_H * max(0., zTopOfCell + G%bathyT(i,j) ) ! In case data is shallower than model
       endif ! mask2dT
     enddo ; enddo
     deallocate( tmp_mask_in )
@@ -2279,24 +2304,21 @@ subroutine MOM_temp_salt_initialize_from_Z(h, tv, G, GV, PF, just_read_params)
     call initialize_remapping( remapCS, remappingScheme, boundary_extrapolation=.false. ) ! Reconstruction parameters
     if (remap_general) then
       call set_regrid_params( regridCS, min_thickness=0. )
-      h(:,:,:) = h1(:,:,:) ; tv%T(:,:,:) = tmpT1dIn(:,:,:) ; tv%S(:,:,:) = tmpS1dIn(:,:,:)
-      do j = js, je ; do i = is, ie
-        if (G%mask2dT(i,j)==0.) then ! Ensure there are no nonsense values on land
-          h(i,j,:) = 0. ; tv%T(i,j,:) = 0. ; tv%S(i,j,:) = 0.
-        endif
-      enddo ; enddo
-      call pass_var(h, G%Domain)    ! Regridding might eventually use spatial information and
-      call pass_var(tv%T, G%Domain) ! thus needs to be up to date in the halo regions even though
-      call pass_var(tv%S, G%Domain) ! ALE_build_grid() only updates h on the computational domain.
-
+      tv_loc = tv
+      tv_loc%T => tmpT1dIn
+      tv_loc%S => tmpS1dIn
+      GV_loc = GV
+      GV_loc%ke = nkd
+      allocate( dz_interface(isd:ied,jsd:jed,nkd+1) ) ! Need for argument to regridding_main() but is not used
       if (use_ice_shelf) then
-         call ALE_build_grid( G, GV, regridCS, remapCS, h, tv, .true., shelf_area)
+        call regridding_main( remapCS, regridCS, G, GV_loc, h1, tv_loc, h, dz_interface, shelf_area )
       else
-         call ALE_build_grid( G, GV, regridCS, remapCS, h, tv, .true. )
+        call regridding_main( remapCS, regridCS, G, GV_loc, h1, tv_loc, h, dz_interface )
       endif
+      deallocate( dz_interface )
     endif
-    call ALE_remap_scalar( remapCS, G, GV, nz, h1, tmpT1dIn, h, tv%T, all_cells=remap_full_column, old_remap=remap_old_alg )
-    call ALE_remap_scalar( remapCS, G, GV, nz, h1, tmpS1dIn, h, tv%S, all_cells=remap_full_column, old_remap=remap_old_alg )
+    call ALE_remap_scalar( remapCS, G, GV, nkd, h1, tmpT1dIn, h, tv%T, all_cells=remap_full_column, old_remap=remap_old_alg )
+    call ALE_remap_scalar( remapCS, G, GV, nkd, h1, tmpS1dIn, h, tv%S, all_cells=remap_full_column, old_remap=remap_old_alg )
     deallocate( h1 )
     deallocate( tmpT1dIn )
     deallocate( tmpS1dIn )

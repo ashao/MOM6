@@ -21,7 +21,7 @@ use MOM_neutral_diffusion_aux, only : check_neutral_positions
 use MOM_remapping,             only : remapping_CS, initialize_remapping
 use MOM_remapping,             only : extract_member_remapping_CS, build_reconstructions_1d
 use MOM_remapping,             only : average_value_ppoly, remappingSchemesDoc, remappingDefaultScheme
-use MOM_tracer_registry,       only : tracer_registry_type
+use MOM_tracer_registry,       only : tracer_registry_type, tracer_type
 use MOM_verticalGrid,          only : verticalGrid_type
 use polynomial_functions,      only : evaluation_polynomial, first_derivative_polynomial
 use PPM_functions,             only : PPM_reconstruction, PPM_boundary_extrapolation
@@ -33,7 +33,6 @@ implicit none ; private
 
 public neutral_diffusion
 public neutral_diffusion_init
-public neutral_diffusion_diag_init
 public neutral_diffusion_end
 public neutral_diffusion_calc_coeffs
 public neutral_diffusion_unit_tests
@@ -44,9 +43,9 @@ type, public :: neutral_diffusion_CS ; private
   integer :: deg = 2 ! Degree of polynomial used for reconstructions
   logical :: continuous_reconstruction = .true.   ! True if using continuous PPM reconstruction at interfaces
   logical :: refine_position = .false.
-  logical :: debug
   logical :: colimit_TS ! If true, limit both T and S flux if one is limited
   logical :: colimit_passive ! If true, limit passive tracers if T or S is limited
+  logical :: debug = .false.
   integer :: max_iter ! Maximum number of iterations if refine_position is defined
   real :: tolerance   ! Convergence criterion representing difference from true neutrality
   real :: ref_pres    ! Reference pressure, negative if using locally referenced neutral density
@@ -80,11 +79,6 @@ type, public :: neutral_diffusion_CS ; private
   logical, allocatable, dimension(:,:,:) :: stable_cell  ! True if the cell is stably stratified wrt to the next cell
 
   type(diag_ctrl), pointer :: diag ! structure to regulate output
-  integer, allocatable, dimension(:) :: id_neutral_diff_tracer_conc_tend    ! tracer concentration tendency
-  integer, allocatable, dimension(:) :: id_neutral_diff_tracer_cont_tend    ! tracer content tendency
-  integer, allocatable, dimension(:) :: id_neutral_diff_tracer_cont_tend_2d ! k-summed tracer content tendency
-  integer, allocatable, dimension(:) :: id_neutral_diff_tracer_trans_x_2d   ! k-summed ndiff zonal tracer transport
-  integer, allocatable, dimension(:) :: id_neutral_diff_tracer_trans_y_2d   ! k-summed ndiff merid tracer transport
   integer :: id_uhEff_2d = -1
   integer :: id_vhEff_2d = -1
 
@@ -238,147 +232,6 @@ logical function neutral_diffusion_init(Time, G, param_file, diag, EOS, CS)
   allocate(CS%vHeff(G%isd:G%ied,G%jsd:G%jed,CS%nsurf-1)); CS%vHeff(G%isc:G%iec,G%jsc-1:G%jec,:) = 0
 
 end function neutral_diffusion_init
-
-!> Diagnostic handles for neutral diffusion tendencies.
-subroutine neutral_diffusion_diag_init(Time, G, diag, C_p, Reg, CS)
-  type(time_type),target,     intent(in)  :: Time   !< Time structure
-  type(ocean_grid_type),      intent(in)  :: G      !< Grid structure
-  type(diag_ctrl),            intent(in)  :: diag   !< Diagnostics control structure
-  type(tracer_registry_type), intent(in)  :: Reg    !< Tracer structure
-  real,                       intent(in)  :: C_p    !< Seawater heat capacity
-  type(neutral_diffusion_CS), pointer     :: CS     !< Neutral diffusion control structure
-
-  ! local
-  integer :: n,ntr
-
-  if(.not. associated(CS)) return
-
-  ntr    = Reg%ntr
-  CS%C_p = C_p
-
-  allocate(CS%id_neutral_diff_tracer_conc_tend(ntr))
-  allocate(CS%id_neutral_diff_tracer_cont_tend(ntr))
-  allocate(CS%id_neutral_diff_tracer_cont_tend_2d(ntr))
-  allocate(CS%id_neutral_diff_tracer_trans_x_2d(ntr))
-  allocate(CS%id_neutral_diff_tracer_trans_y_2d(ntr))
-  CS%id_neutral_diff_tracer_conc_tend(:)    = -1
-  CS%id_neutral_diff_tracer_cont_tend(:)    = -1
-  CS%id_neutral_diff_tracer_cont_tend_2d(:) = -1
-  CS%id_neutral_diff_tracer_trans_x_2d(:)   = -1
-  CS%id_neutral_diff_tracer_trans_y_2d(:)   = -1
-
-  do n=1,ntr
-
-    if(trim(Reg%Tr(n)%name) == 'T') then
-
-      CS%id_neutral_diff_tracer_conc_tend(n) = register_diag_field('ocean_model',  &
-      'ndiff_tracer_conc_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,      &
-      'Neutral diffusion tracer concentration tendency for '//trim(Reg%Tr(n)%name),&
-      'degC s-1')
-
-      CS%id_neutral_diff_tracer_cont_tend(n) = register_diag_field('ocean_model',                                      &
-      'ndiff_tracer_cont_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,                                          &
-      'Neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),                                          &
-      'W m-2',cmor_field_name='opottemppmdiff',                                                                     &
-      cmor_standard_name=                                                                                              &
-      'tendency_of_sea_water_potential_temperature_expressed_as_heat_content_due_to_parameterized_mesocale_diffusion', &
-      cmor_long_name =                                                                                                 &
-      'Tendency of sea water potential temperature expressed as heat content due to parameterized mesocale diffusion', &
-      v_extensive=.true.)
-
-      CS%id_neutral_diff_tracer_cont_tend_2d(n) = register_diag_field('ocean_model',                                                   &
-      'ndiff_tracer_cont_tendency_2d_'//trim(Reg%Tr(n)%name), diag%axesT1, Time,                                                       &
-      'Depth integrated neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),                                         &
-      'W m-2',cmor_field_name='opottemppmdiff_2d',                                                                                  &
-      cmor_standard_name=                                                                                                              &
-      'tendency_of_sea_water_potential_temperature_expressed_as_heat_content_due_to_parameterized_mesocale_diffusion_depth_integrated',&
-      cmor_long_name =                                                                                                                 &
-      'Tendency of sea water potential temperature expressed as heat content due to parameterized mesocale diffusion depth integrated')
-
-      CS%id_neutral_diff_tracer_trans_x_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_x_2d_'//trim(Reg%Tr(n)%name), diag%axesCu1, Time,                  &
-      'Depth integrated neutral diffusion zonal tracer transport for '//trim(Reg%Tr(n)%name),&
-      'W')
-
-      CS%id_neutral_diff_tracer_trans_y_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_y_2d_'//trim(Reg%Tr(n)%name), diag%axesCv1, Time,                  &
-      'Depth integrated neutral diffusion merid tracer transport for '//trim(Reg%Tr(n)%name),&
-      'W')
-
-    elseif(trim(Reg%Tr(n)%name) == 'S') then
-
-      CS%id_neutral_diff_tracer_conc_tend(n) = register_diag_field('ocean_model',  &
-      'ndiff_tracer_conc_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,      &
-      'Neutral diffusion tracer concentration tendency for '//trim(Reg%Tr(n)%name),&
-      'tracer concentration * s-1')
-
-      CS%id_neutral_diff_tracer_cont_tend(n) = register_diag_field('ocean_model',                         &
-      'ndiff_tracer_cont_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,                             &
-      'Neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),                             &
-      'kg m-2 s-1',cmor_field_name='osaltpmdiff',                                                         &
-      cmor_standard_name=                                                                                 &
-      'tendency_of_sea_water_salinity_expressed_as_salt_content_due_to_parameterized_mesocale_diffusion', &
-      cmor_long_name =                                                                                    &
-      'Tendency of sea water salinity expressed as salt content due to parameterized mesocale diffusion', &
-      v_extensive=.true.)
-
-      CS%id_neutral_diff_tracer_cont_tend_2d(n) = register_diag_field('ocean_model',                                      &
-      'ndiff_tracer_cont_tendency_2d_'//trim(Reg%Tr(n)%name), diag%axesT1, Time,                                          &
-      'Depth integrated neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),                            &
-      'kg m-2 s-1',cmor_field_name='osaltpmdiff_2d',                                                                      &
-      cmor_standard_name=                                                                                                 &
-      'tendency_of_sea_water_salinity_expressed_as_salt_content_due_to_parameterized_mesocale_diffusion_depth_integrated',&
-      cmor_long_name =                                                                                                    &
-      'Tendency of sea water salinity expressed as salt content due to parameterized mesocale diffusion depth integrated')
-
-      CS%id_neutral_diff_tracer_trans_x_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_x_2d_'//trim(Reg%Tr(n)%name), diag%axesCu1, Time,                  &
-      'Depth integrated neutral diffusion zonal tracer transport for '//trim(Reg%Tr(n)%name),&
-      'kg s-1')
-
-      CS%id_neutral_diff_tracer_trans_y_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_y_2d_'//trim(Reg%Tr(n)%name), diag%axesCv1, Time,                  &
-      'Depth integrated neutral diffusion merid tracer transport for '//trim(Reg%Tr(n)%name),&
-      'kg s-1')
-
-    else
-
-      CS%id_neutral_diff_tracer_conc_tend(n) = register_diag_field('ocean_model',  &
-      'ndiff_tracer_conc_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,      &
-      'Neutral diffusion tracer concentration tendency for '//trim(Reg%Tr(n)%name),&
-       'tracer concentration * m-2 s-1')
-
-      CS%id_neutral_diff_tracer_cont_tend(n) = register_diag_field('ocean_model',&
-      'ndiff_tracer_cont_tendency_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,    &
-      'Neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),    &
-      'tracer content * m-2 s-1', v_extensive=.true.)
-
-      CS%id_neutral_diff_tracer_cont_tend_2d(n) = register_diag_field('ocean_model',          &
-      'ndiff_tracer_cont_tendency_2d_'//trim(Reg%Tr(n)%name), diag%axesTL, Time,              &
-      'Depth integrated neutral diffusion tracer content tendency for '//trim(Reg%Tr(n)%name),&
-      'tracer content * m-2 s-1')
-
-      CS%id_neutral_diff_tracer_trans_x_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_x_2d_'//trim(Reg%Tr(n)%name), diag%axesCu1, Time,                  &
-      'Depth integrated neutral diffusion zonal tracer transport for '//trim(Reg%Tr(n)%name),&
-      'kg s-1')
-
-      CS%id_neutral_diff_tracer_trans_y_2d(n) = register_diag_field('ocean_model',           &
-      'ndiff_tracer_trans_y_2d_'//trim(Reg%Tr(n)%name), diag%axesCv1, Time,                  &
-      'Depth integrated neutral diffusion merid tracer transport for '//trim(Reg%Tr(n)%name),&
-      'kg s-1')
-
-    endif
-
-  enddo
-
-  CS%id_uheff_2d = register_diag_field('ocean_model', 'uhEff_2d', diag%axesCu1, Time, &
-    'Total thickness of diffusive sublayers at u-points', 'm')
-  CS%id_vheff_2d = register_diag_field('ocean_model', 'vhEff_2d', diag%axesCv1, Time, &
-    'Total thickness of diffusive sublayers at v-points', 'm')
-
-end subroutine neutral_diffusion_diag_init
-
 
 !> Calculate remapping factors for u/v columns used to map adjoining columns to
 !! a shared coordinate space.
@@ -558,14 +411,14 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, CS)
 end subroutine neutral_diffusion_calc_coeffs
 
 !> Update tracer concentration due to neutral diffusion; layer thickness unchanged by this update.
-subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
+subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
   type(ocean_grid_type),                     intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type),                   intent(in)    :: GV     !< ocean vertical grid structure
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(in)    :: h      !< Layer thickness (H units)
   real, dimension(SZIB_(G),SZJ_(G)),         intent(in)    :: Coef_x !< dt * Kh * dy / dx at u-points (m^2)
   real, dimension(SZI_(G),SZJB_(G)),         intent(in)    :: Coef_y !< dt * Kh * dx / dy at u-points (m^2)
-  type(tracer_registry_type),                intent(inout) :: Tracer_reg !< registered tracers
   real,                                      intent(in)    :: dt     !< Tracer time step * I_numitts (I_numitts in tracer_hordiff)
+  type(tracer_registry_type),                pointer       :: Reg    !< Tracer registry
   type(neutral_diffusion_CS),                pointer       :: CS     !< Neutral diffusion control structure
 
   ! Local variables
@@ -599,11 +452,11 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
   vFlx_limited(:,:,:) = .false.
 
   ! First loop over the tracer registry and calculate T and S fluxes
-  do m = 1,Tracer_reg%ntr
-    Tracer => Tracer_reg%Tr(m)%t
-    name = Tracer_reg%Tr(m)%name
+  do m = 1,Reg%ntr
+    Tracer => Reg%Tr(m)%t
+    name = Reg%Tr(m)%name
 
-    if ((name == 'T') .or. (name == 'S')) then
+    if ((trim(name) == 'T') .or. (trim(name) == 'S')) then
       uFlx(:,:,:) = 0.
       vFlx(:,:,:) = 0.
       ! x-flux
@@ -667,18 +520,16 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
   endif
   ! Apply T flux
   name = 'T'
-  Tracer => Tracer_reg%Tr(T_idx)%t
-  call apply_ndiff_flux(CS, G, GV, T_idx, dt, h, Coef_x, Coef_y, T_uFlx, T_vFlx, Tracer, name)
+  call apply_ndiff_flux( CS, G, GV, T_idx, dt, h, Coef_x, Coef_y, T_uFlx, T_vFlx, Reg%Tr(T_idx) )
   ! Apply S flux
   name = 'S'
-  Tracer => Tracer_reg%Tr(S_idx)%t
-  call apply_ndiff_flux(CS, G, GV, S_idx, dt, h, Coef_x, Coef_y, S_uFlx, S_vFlx, Tracer, name)
+  call apply_ndiff_flux( CS, G, GV, S_idx, dt, h, Coef_x, Coef_y, S_uFlx, S_vFlx, Reg%Tr(S_idx) )
 
   ! Now do the passive tracers and apply colimiter if requested
-  do m = 1,Tracer_reg%ntr
+  do m = 1,Reg%ntr
     if ( (m /= T_idx) .and. (m /= S_idx) ) then
-      Tracer => Tracer_reg%Tr(m)%t
-      name = Tracer_reg%Tr(m)%name
+      Tracer => Reg%Tr(m)%t
+      name = Reg%Tr(m)%name
       uFlx(:,:,:) = 0.
       vFlx(:,:,:) = 0.
 
@@ -713,14 +564,14 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, Tracer_reg, dt, CS)
           endif
         enddo ; enddo ; enddo
       endif
-      call apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tracer, name)
+      call apply_ndiff_flux( CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Reg%Tr(m) )
     endif
   enddo
 
 end subroutine neutral_diffusion
 
 !> Update the tracer concentration from divergence of neutral diffusive flux components
-subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tracer, name)
+subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, tracer)
   type(neutral_diffusion_CS),                        pointer    :: CS     !< Neutral diffusion control structure
   type(ocean_grid_type),                             intent(in) :: G      !< Ocean grid structure
   type(verticalGrid_type),                           intent(in) :: GV     !< ocean vertical grid structure
@@ -731,8 +582,7 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
   real, dimension(SZI_(G),SZJB_(G)),                 intent(in) :: Coef_y !< dt * Kh * dx / dy at u-points (m^2)
   real, dimension(SZIB_(G),SZJ_(G),CS%nsurf-1),      intent(in) :: uFlx   !< Zonal flux of tracer      (concentration * H)
   real, dimension(SZI_(G),SZJB_(G),CS%nsurf-1),      intent(in) :: vFlx   !< Meridional flux of tracer (concentration * H)
-  real, dimension(:,:,:),                            pointer    :: Tracer !< Tracer concentration
-  character(len=32),                                 intent(in) :: name   ! Tracer name
+  type(tracer_type),                                 intent(in) :: tracer !< Tracer currently being worked on
 
   real, dimension(SZI_(G),SZJ_(G),G%ke)        :: tendency    ! tendency array for diagn
   real, dimension(SZI_(G),SZJ_(G))             :: tendency_2d ! depth integrated content tendency for diagn
@@ -743,22 +593,13 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
   integer :: i, j, k, ks, nk
 
   ! for diagnostics
-  if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
-     CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
-     CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0  .or.  &
-     CS%id_neutral_diff_tracer_trans_x_2d(m)   > 0  .or.  &
-     CS%id_neutral_diff_tracer_trans_y_2d(m)   > 0) then
-     ppt2mks          = 0.001
+  if(tracer%id_dfxy_conc    > 0 .or. tracer%id_dfxy_cont > 0 .or. tracer%id_dfxy_cont_2d > 0 .or. &
+     tracer%id_dfx_2d       > 0 .or. tracer%id_dfy_2d > 0) then
      Idt              = 1.0/dt
      tendency(:,:,:)  = 0.0
-     tendency_2d(:,:) = 0.0
-     trans_x_2d(:,:)  = 0.0
-     trans_y_2d(:,:)  = 0.0
-     convert          = 1.0
-     if(trim(name) == 'T') convert = CS%C_p  * GV%H_to_kg_m2
-     if(trim(name) == 'S') convert = ppt2mks * GV%H_to_kg_m2
   endif
 
+  ! Update the tracer concentration from divergence of neutral diffusive flux components
   do j = G%jsc,G%jec ; do i = G%isc,G%iec
     if (G%mask2dT(i,j)>0.) then
 
@@ -774,13 +615,11 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
         dTracer(k) = dTracer(k) - Coef_y(i,J-1) * vFlx(i,J-1,ks)
       enddo
       do k = 1, GV%ke
-        Tracer(i,j,k) = Tracer(i,j,k) + dTracer(k) * &
+        tracer%t(i,j,k) = tracer%t(i,j,k) + dTracer(k) * &
                         ( G%IareaT(i,j) / ( h(i,j,k) + GV%H_subroundoff ) )
       enddo
 
-      if(CS%id_neutral_diff_tracer_conc_tend(m)    > 0  .or.  &
-         CS%id_neutral_diff_tracer_cont_tend(m)    > 0  .or.  &
-         CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0 ) then
+      if(tracer%id_dfxy_conc > 0  .or. tracer%id_dfxy_cont > 0 .or. tracer%id_dfxy_cont_2d > 0 ) then
         do k = 1, GV%ke
           tendency(i,j,k) = dTracer(k) * G%IareaT(i,j) * Idt
         enddo
@@ -791,58 +630,59 @@ subroutine apply_ndiff_flux(CS, G, GV, m, dt, h, Coef_x, Coef_y, uFlx, vFlx, Tra
 
   ! Diagnose vertically summed zonal flux, giving zonal tracer transport from ndiff.
   ! Note sign corresponds to downgradient flux convention.
-  if(CS%id_neutral_diff_tracer_trans_x_2d(m) > 0) then
+  if(tracer%id_dfx_2d > 0) then
     do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
       trans_x_2d(I,j) = 0.
       if (G%mask2dCu(I,j)>0.) then
         do ks = 1,CS%nsurf-1 ;
           trans_x_2d(I,j) = trans_x_2d(I,j) - Coef_x(I,j) * uFlx(I,j,ks)
         enddo
-        trans_x_2d(I,j) = trans_x_2d(I,j) * Idt * convert
+        trans_x_2d(I,j) = trans_x_2d(I,j) * Idt
       endif
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_trans_x_2d(m), trans_x_2d(:,:), CS%diag)
+    call post_data(tracer%id_dfx_2d, trans_x_2d(:,:), CS%diag)
   endif
 
   ! Diagnose vertically summed merid flux, giving meridional tracer transport from ndiff.
   ! Note sign corresponds to downgradient flux convention.
-  if(CS%id_neutral_diff_tracer_trans_y_2d(m) > 0) then
+  if(tracer%id_dfy_2d > 0) then
     do J = G%jsc-1,G%jec ; do i = G%isc,G%iec
       trans_y_2d(i,J) = 0.
       if (G%mask2dCv(i,J)>0.) then
         do ks = 1,CS%nsurf-1 ;
           trans_y_2d(i,J) = trans_y_2d(i,J) - Coef_y(i,J) * vFlx(i,J,ks)
         enddo
-        trans_y_2d(i,J) = trans_y_2d(i,J) * Idt * convert
+        trans_y_2d(i,J) = trans_y_2d(i,J) * Idt
       endif
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_trans_y_2d(m), trans_y_2d(:,:), CS%diag)
+    call post_data(tracer%id_dfy_2d, trans_y_2d(:,:), CS%diag)
   endif
 
   ! post tendency of tracer content
-  if(CS%id_neutral_diff_tracer_cont_tend(m) > 0) then
-    call post_data(CS%id_neutral_diff_tracer_cont_tend(m), tendency(:,:,:)*convert, CS%diag)
+  if(tracer%id_dfxy_cont > 0) then
+    call post_data(tracer%id_dfxy_cont, tendency(:,:,:), CS%diag)
   endif
 
   ! post depth summed tendency for tracer content
-  if(CS%id_neutral_diff_tracer_cont_tend_2d(m) > 0) then
+  if(tracer%id_dfxy_cont_2d > 0) then
+    tendency_2d(:,:) = 0.
     do j = G%jsc,G%jec ; do i = G%isc,G%iec
       do k = 1, GV%ke
         tendency_2d(i,j) = tendency_2d(i,j) + tendency(i,j,k)
       enddo
     enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_cont_tend_2d(m), tendency_2d(:,:)*convert, CS%diag)
+    call post_data(tracer%id_dfxy_cont_2d, tendency_2d(:,:), CS%diag)
   endif
 
   ! post tendency of tracer concentration; this step must be
   ! done after posting tracer content tendency, since we alter
   ! the tendency array.
-  if(CS%id_neutral_diff_tracer_conc_tend(m) > 0) then
+  if(tracer%id_dfxy_conc > 0) then
     do k = 1, GV%ke ; do j = G%jsc,G%jec ; do i = G%isc,G%iec
       tendency(i,j,k) =  tendency(i,j,k) / ( h(i,j,k) + GV%H_subroundoff )
     enddo ; enddo ; enddo
-    call post_data(CS%id_neutral_diff_tracer_conc_tend(m), tendency, CS%diag)
-    endif
+    call post_data(tracer%id_dfxy_conc, tendency, CS%diag)
+  endif
 
 end subroutine apply_ndiff_flux
 
@@ -1308,7 +1148,7 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   logical :: search_layer
   integer :: k, kl_left_0, kl_right_0
   real    :: dRho, dRhoTop, dRhoBot, hL, hR
-  real    :: last_refine_drho_left, last_refine_drho_right
+  real    :: last_refine_drho_left, last_refine_drho_right, drho_refine
   integer :: lastK_left, lastK_right
   real    :: lastP_left, lastP_right
   real    :: min_bound
@@ -1357,8 +1197,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
     dRho = 0.5 * &
       ( ( dRdT_r(kl_right,ki_right) + dRdT_l(kl_left,ki_left) ) * ( Tr(kl_right,ki_right) - Tl(kl_left,ki_left) ) &
       + ( dRdS_r(kl_right,ki_right) + dRdS_l(kl_left,ki_left) ) * ( Sr(kl_right,ki_right) - Sl(kl_left,ki_left) ) )
-    if (CS%debug)  write(*,'(A,I2,A,E12.4,A,I2,A,I2,A,I2,A,I2)') "k_surface=",k_surface,"  dRho=",dRho,"  &
-        kl_left=",kl_left, "  ki_left=",ki_left,"  kl_right=",kl_right, "  ki_right=",ki_right
+    if (CS%debug)  write(*,'(A,I2,A,E12.4,A,I2,A,I2,A,I2,A,I2)') "k_surface=",k_surface,"  dRho=",dRho,  &
+        "kl_left=",kl_left, "  ki_left=",ki_left,"  kl_right=",kl_right, "  ki_right=",ki_right
     ! Which column has the lighter surface for the current indexes, kr and kl
     if (.not. reached_bottom) then
       if (dRho < 0.) then
@@ -1427,11 +1267,16 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
             last_refine_drho_left = 0.
           endif
         endif
-        call refine_nondim_position( CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, &
+        call refine_nondim_position( CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other,             &
                             Pres_l(kl_left), Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), &
-                            dRhoTop, dRhoBot, min_bound, PoL(k_surface), last_refine_drho_left, &
+                            dRhoTop, dRhoBot, min_bound, PoL(k_surface), drho_refine,                       &
                             rho_offset = last_refine_drho_left )
-
+        ! If drho_refine is negative, then the logic works fine and there's no need to offset delta_rho next time
+        if (drho_refine > 0) then
+          last_refine_drho_left = drho_refine
+        else
+          last_refine_drho_left = 0.
+        endif
       endif
       if (PoL(k_surface) == 0.) top_connected_l(KoL(k_surface)) = .true.
       if (PoL(k_surface) == 1.) bot_connected_l(KoL(k_surface)) = .true.
@@ -1488,8 +1333,14 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
         endif
         call refine_nondim_position(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other,                  &
                             Pres_r(kl_right), Pres_r(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), &
-                            dRhoTop, dRhoBot, min_bound, PoR(k_surface), last_refine_drho_right,                &
+                            dRhoTop, dRhoBot, min_bound, PoR(k_surface), drho_refine,                &
                             rho_offset = last_refine_drho_right )
+        ! If drho_refine is negative, then the logic works fine and there's no need to offset delta_rho next time
+        if (drho_refine > 0) then
+          last_refine_drho_left = drho_refine
+        else
+          last_refine_drho_left = 0.
+        endif
       endif
       if (PoR(k_surface) == 0.) top_connected_r(KoR(k_surface)) = .true.
       if (PoR(k_surface) == 1.) bot_connected_r(KoR(k_surface)) = .true.

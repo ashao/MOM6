@@ -92,7 +92,8 @@ use SCM_CVmix_tests,         only : SCM_CVmix_tests_buoyancy_forcing
 use SCM_CVmix_tests,         only : SCM_CVmix_tests_CS
 use BFB_surface_forcing,    only : BFB_buoyancy_forcing
 use BFB_surface_forcing,    only : BFB_surface_forcing_init, BFB_surface_forcing_CS
-
+use dumbbell_surface_forcing,    only : dumbbell_surface_forcing_init, dumbbell_surface_forcing_CS
+use dumbbell_surface_forcing, only    : dumbbell_buoyancy_forcing
 use data_override_mod, only : data_override_init, data_override
 
 implicit none ; private
@@ -118,6 +119,8 @@ type, public :: surface_forcing_CS ; private
   real :: Rho0                  ! Boussinesq reference density (kg/m^3)
   real :: G_Earth               ! gravitational acceleration (m/s^2)
   real :: Flux_const            ! piston velocity for surface restoring (m/s)
+  real :: Flux_const_T          ! piston velocity for surface temperature restoring (m/s)
+  real :: Flux_const_S          ! piston velocity for surface salinity restoring (m/s)
   real :: latent_heat_fusion    ! latent heat of fusion (J/kg)
   real :: latent_heat_vapor     ! latent heat of vaporization (J/kg)
   real :: tau_x0, tau_y0        ! Constant wind stresses used in the WIND_CONFIG="const" forcing
@@ -202,6 +205,7 @@ type, public :: surface_forcing_CS ; private
   type(user_revise_forcing_CS),  pointer :: urf_CS => NULL()
   type(user_surface_forcing_CS), pointer :: user_forcing_CSp => NULL()
   type(BFB_surface_forcing_CS), pointer :: BFB_forcing_CSp => NULL()
+  type(dumbbell_surface_forcing_CS), pointer :: dumbbell_forcing_CSp => NULL()
   type(MESO_surface_forcing_CS), pointer :: MESO_forcing_CSp => NULL()
   type(Neverland_surface_forcing_CS), pointer :: Neverland_forcing_CSp => NULL()
   type(SCM_idealized_hurricane_CS), pointer :: SCM_idealized_hurricane_CSp => NULL()
@@ -328,6 +332,8 @@ subroutine set_forcing(sfc_state, forces, fluxes, day_start, day_interval, G, CS
       call USER_buoyancy_forcing(sfc_state, fluxes, day_center, dt, G, CS%user_forcing_CSp)
     elseif (trim(CS%buoy_config) == "BFB") then
       call BFB_buoyancy_forcing(sfc_state, fluxes, day_center, dt, G, CS%BFB_forcing_CSp)
+    elseif (trim(CS%buoy_config) == "dumbbell") then
+      call dumbbell_buoyancy_forcing(sfc_state, fluxes, day_center, dt, G, CS%dumbbell_forcing_CSp)
     elseif (trim(CS%buoy_config) == "NONE") then
       call MOM_mesg("MOM_surface_forcing: buoyancy forcing has been set to omitted.")
     elseif (CS%variable_buoyforce .and. .not.CS%first_call_set_forcing) then
@@ -1033,8 +1039,8 @@ subroutine buoyancy_forcing_from_files(sfc_state, fluxes, day, dt, G, CS)
       do j=js,je ; do i=is,ie
         if (G%mask2dT(i,j) > 0) then
           fluxes%heat_added(i,j) = G%mask2dT(i,j) * &
-              ((CS%T_Restore(i,j) - sfc_state%SST(i,j)) * rhoXcp * CS%Flux_const)
-          fluxes%vprec(i,j) = - (CS%Rho0*CS%Flux_const) * &
+              ((CS%T_Restore(i,j) - sfc_state%SST(i,j)) * rhoXcp * CS%Flux_const_T)
+          fluxes%vprec(i,j) = - (CS%Rho0*CS%Flux_const_S) * &
               (CS%S_Restore(i,j) - sfc_state%SSS(i,j)) / &
               (0.5*(sfc_state%SSS(i,j) + CS%S_Restore(i,j)))
         else
@@ -1189,8 +1195,8 @@ subroutine buoyancy_forcing_from_data_override(sfc_state, fluxes, day, dt, G, CS
       do j=js,je ; do i=is,ie
         if (G%mask2dT(i,j) > 0) then
           fluxes%heat_added(i,j) = G%mask2dT(i,j) * &
-              ((CS%T_Restore(i,j) - sfc_state%SST(i,j)) * rhoXcp * CS%Flux_const)
-          fluxes%vprec(i,j) = - (CS%Rho0*CS%Flux_const) * &
+              ((CS%T_Restore(i,j) - sfc_state%SST(i,j)) * rhoXcp * CS%Flux_const_T)
+          fluxes%vprec(i,j) = - (CS%Rho0*CS%Flux_const_S) * &
               (CS%S_Restore(i,j) - sfc_state%SSS(i,j)) / &
               (0.5*(sfc_state%SSS(i,j) + CS%S_Restore(i,j)))
         else
@@ -1754,8 +1760,25 @@ subroutine surface_forcing_init(Time, G, param_file, diag, CS, tracer_flow_CSp)
                  "to the relative surface anomalies (akin to a piston \n"//&
                  "velocity).  Note the non-MKS units.", units="m day-1", &
                  fail_if_missing=.true.)
-    ! Convert CS%Flux_const from m day-1 to m s-1.
+
+    if (CS%use_temperature) then
+      call get_param(param_file, mdl, "FLUXCONST_T", CS%Flux_const_T, &
+           "The constant that relates the restoring surface temperature\n"//&
+           "flux to the relative surface anomaly (akin to a piston \n"//&
+           "velocity).  Note the non-MKS units.", units="m day-1", &
+           default=CS%Flux_const)
+      call get_param(param_file, mdl, "FLUXCONST_S", CS%Flux_const_S, &
+           "The constant that relates the restoring surface salinity\n"//&
+           "flux to the relative surface anomaly (akin to a piston \n"//&
+           "velocity).  Note the non-MKS units.", units="m day-1", &
+           default=CS%Flux_const)
+    endif
+
+    ! Convert flux constants from m day-1 to m s-1.
     CS%Flux_const = CS%Flux_const / 86400.0
+    CS%Flux_const_T = CS%Flux_const_T / 86400.0
+    CS%Flux_const_S = CS%Flux_const_S / 86400.0
+
     if (trim(CS%buoy_config) == "linear") then
       call get_param(param_file, mdl, "SST_NORTH", CS%T_north, &
                  "With buoy_config linear, the sea surface temperature \n"//&
@@ -1801,6 +1824,8 @@ subroutine surface_forcing_init(Time, G, param_file, diag, CS, tracer_flow_CSp)
     call USER_surface_forcing_init(Time, G, param_file, diag, CS%user_forcing_CSp)
   elseif (trim(CS%buoy_config) == "BFB" ) then
     call BFB_surface_forcing_init(Time, G, param_file, diag, CS%BFB_forcing_CSp)
+  elseif (trim(CS%buoy_config) == "dumbbell" ) then
+    call dumbbell_surface_forcing_init(Time, G, param_file, diag, CS%dumbbell_forcing_CSp)
   elseif (trim(CS%wind_config) == "MESO" .or. trim(CS%buoy_config) == "MESO" ) then
     call MESO_surface_forcing_init(Time, G, param_file, diag, CS%MESO_forcing_CSp)
   elseif (trim(CS%wind_config) == "Neverland") then
