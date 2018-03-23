@@ -394,7 +394,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
   ! Calculate the initial values
   call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, min_bound, &
                    delta_rho, P_int, T, S, alpha_avg, beta_avg, delta_T, delta_S)
-  if (present(rho_offset)) delta_rho = delta_rho + rho_offset
+  if (present(rho_offset)) delta_rho = delta_rho - rho_offset
   delta_rho_init = delta_rho
   if ( ABS(delta_rho_init) <= CS%drho_tol ) then
     pos_out = min_bound
@@ -455,7 +455,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
       endif
       call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S,   &
                        b, fb, P_int, T, S, alpha_avg, beta_avg, delta_T, delta_S)
-      if (present(rho_offset)) delta_rho = fb + rho_offset
+      if (present(rho_offset)) delta_rho = fb - rho_offset
 
       if (CS%debug) write(*,'(A,I3.3,X,ES23.15,X,ES23.15)') "Iteration, b, fb: ", iter, b, fb
 
@@ -545,7 +545,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
       call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, &
                        sb, fb)
 
-      if (present(rho_offset)) delta_rho = fb + rho_offset
+      if (present(rho_offset)) delta_rho = fb - rho_offset
       if ( ( 0. < fb .and. 0. < fc ) .or. &
            ( fb <= 0. .and. fc <= 0. ) ) then
         c = sa
@@ -598,7 +598,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
   if (CS%debug) then
     call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, &
                      pos_out, delta_rho)
-    if (present(rho_offset)) delta_rho = delta_rho + rho_offset
+    if (present(rho_offset)) delta_rho = delta_rho - rho_offset
     write (*,*) "End delta_rho: ", delta_rho
     write (*,*) "x0, delta_x: ", min_bound, pos_out-min_bound
     write (*,*) "pos_out: ", pos_out

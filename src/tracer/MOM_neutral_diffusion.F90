@@ -456,7 +456,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
     Tracer => Reg%Tr(m)%t
     name = Reg%Tr(m)%name
 
-    if ((trim(name) == 'T') .or. (trim(name) == 'S')) then
+    if ((trim(name) == 'temp') .or. (trim(name) == 'salt')) then
       uFlx(:,:,:) = 0.
       vFlx(:,:,:) = 0.
       ! x-flux
@@ -482,7 +482,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
       enddo ; enddo
 
       ! Defer T and S flux until later
-      if ( (trim(name) == 'T')) then
+      if ( (trim(name) == 'temp')) then
         T_idx = m
         do k = 1,CS%nsurf-1 ; do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
           T_uFlx(I,j,k) = uFlx(I,j,k)
@@ -490,7 +490,7 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
         do k = 1,CS%nsurf-1 ; do J = G%jsc-1,G%jec ; do i = G%isc,G%iec
           T_vFlx(I,j,k) = vFlx(I,j,k)
         enddo ; enddo ; enddo
-      elseif ( (trim(name) == 'S')) then
+      elseif ( (trim(name) == 'salt')) then
         S_idx = m
         do k = 1,CS%nsurf-1 ; do j = G%jsc,G%jec ; do I = G%isc-1,G%iec
           S_uFlx(I,j,k) = uFlx(I,j,k)
@@ -1230,14 +1230,14 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       S_other = Sr(kl_right, ki_right)
       dRdT_other = dRdT_r(kl_right, ki_right)
       dRdS_other = dRdS_r(kl_right, ki_right)
-      if (CS%refine_position .and. (lastK_left == kl_left)) then
-        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_l(kl_left),       &
-                         Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), lastP_left, dRhoTop)
-        dRhoTop = dRhoTop + last_refine_drho_left
-      else
+!      if (CS%refine_position .and. (lastK_left == kl_left)) then
+!        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_l(kl_left),       &
+!                         Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), lastP_left, dRhoTop)
+!        dRhoTop = dRhoTop - last_refine_drho_left
+!      else
         dRhoTop = calc_drho(Tl(kl_left,1), Sl(kl_left,1), dRdT_l(kl_left,1), dRdS_l(kl_left,1), T_other, S_other,  &
                             dRdT_other, dRdS_other)
-      endif
+!      endif
       ! Potential density difference, rho(kl) - rho(kl_right,ki_right) (will be positive)
       dRhoBot = calc_drho(Tl(kl_left,2), Sl(kl_left,2), dRdT_l(kl_left,2), dRdS_l(kl_left,2), &
                           T_other, S_other, dRdT_other, dRdS_other)
@@ -1296,14 +1296,14 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       ! Interpolate for the neutral surface position within the right column, layer krm1
       ! Potential density difference, rho(kr-1) - rho(kl) (should be negative)
 
-      if (CS%refine_position .and. (lastK_right == kl_right)) then
-        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_r(kl_right),          &
-                         Pres_l(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), lastP_right, dRhoTop)
-        dRhoTop = dRhoTop + last_refine_drho_right
-      else
+!      if (CS%refine_position .and. (lastK_right == kl_right)) then
+!        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_r(kl_right),          &
+!                         Pres_l(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), lastP_right, dRhoTop)
+!        dRhoTop = dRhoTop - last_refine_drho_right
+!      else
         dRhoTop = calc_drho(Tr(kl_right,1), Sr(kl_right,1), dRdT_r(kl_right,1), dRdS_r(kl_right,1), &
                     T_other, S_other, dRdT_other, dRdS_other)
-      endif
+!      endif
       dRhoBot = calc_drho(Tr(kl_right,2), Sr(kl_right,2), dRdT_r(kl_right,2), dRdS_r(kl_right,2), &
                   T_other, S_other, dRdT_other, dRdS_other)
       if (CS%debug) then
@@ -1337,9 +1337,9 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
                             rho_offset = last_refine_drho_right )
         ! If drho_refine is negative, then the logic works fine and there's no need to offset delta_rho next time
         if (drho_refine > 0) then
-          last_refine_drho_left = drho_refine
+          last_refine_drho_right = drho_refine
         else
-          last_refine_drho_left = 0.
+          last_refine_drho_right = 0.
         endif
       endif
       if (PoR(k_surface) == 0.) top_connected_r(KoR(k_surface)) = .true.
