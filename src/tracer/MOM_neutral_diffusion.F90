@@ -1308,6 +1308,7 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   logical :: search_layer
   integer :: k, kl_left_0, kl_right_0
   real    :: dRho, dRhoTop, dRhoBot, hL, hR
+  real    :: last_refine_drho_left, last_refine_drho_right
   integer :: lastK_left, lastK_right
   real    :: lastP_left, lastP_right
   real    :: min_bound
@@ -1346,6 +1347,9 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   reached_bottom = .false.
   searching_left_column = .false.
   searching_right_column = .false.
+
+  last_refine_drho_left = 0.
+  last_refine_drho_right = 0.
 
   ! Loop over each neutral surface, working from top to bottom
   neutral_surfaces: do k_surface = 1, ns
@@ -1389,6 +1393,7 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if (CS%refine_position .and. (lastK_left == kl_left)) then
         call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_l(kl_left),       &
                          Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), lastP_left, dRhoTop)
+        dRhoTop = dRhoTop + last_refine_drho_left
       else
         dRhoTop = calc_drho(Tl(kl_left,1), Sl(kl_left,1), dRdT_l(kl_left,1), dRdS_l(kl_left,1), T_other, S_other,  &
                             dRdT_other, dRdS_other)
@@ -1416,11 +1421,17 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if ( CS%refine_position .and. search_layer ) then
         min_bound = 0.
         if (k_surface > 1) then
-          if ( KoL(k_surface) == KoL(k_surface-1) ) min_bound = PoL(k_surface-1)
+          if ( KoL(k_surface) == KoL(k_surface-1) ) then
+            min_bound = PoL(k_surface-1)
+          else
+            last_refine_drho_left = 0.
+          endif
         endif
-        PoL(k_surface) = refine_nondim_position( CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, &
+        call refine_nondim_position( CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, &
                             Pres_l(kl_left), Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), &
-                            dRhoTop, dRhoBot, min_bound )
+                            dRhoTop, dRhoBot, min_bound, PoL(k_surface), last_refine_drho_left, &
+                            rho_offset = last_refine_drho_left )
+
       endif
       if (PoL(k_surface) == 0.) top_connected_l(KoL(k_surface)) = .true.
       if (PoL(k_surface) == 1.) bot_connected_l(KoL(k_surface)) = .true.
@@ -1443,6 +1454,7 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if (CS%refine_position .and. (lastK_right == kl_right)) then
         call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_r(kl_right),          &
                          Pres_l(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), lastP_right, dRhoTop)
+        dRhoTop = dRhoTop + last_refine_drho_right
       else
         dRhoTop = calc_drho(Tr(kl_right,1), Sr(kl_right,1), dRdT_r(kl_right,1), dRdS_r(kl_right,1), &
                     T_other, S_other, dRdT_other, dRdS_other)
@@ -1468,11 +1480,16 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if ( CS%refine_position .and. search_layer) then
         min_bound = 0.
         if (k_surface > 1) then
-          if ( KoR(k_surface) == KoR(k_surface-1) )  min_bound = PoR(k_surface-1)
+          if ( KoR(k_surface) == KoR(k_surface-1) ) then
+            min_bound = PoR(k_surface-1)
+          else
+            last_refine_drho_right = 0.
+          endif
         endif
-        PoR(k_surface) = refine_nondim_position(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other,      &
+        call refine_nondim_position(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other,                  &
                             Pres_r(kl_right), Pres_r(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), &
-                            dRhoTop, dRhoBot, min_bound )
+                            dRhoTop, dRhoBot, min_bound, PoR(k_surface), last_refine_drho_right,                &
+                            rho_offset = last_refine_drho_right )
       endif
       if (PoR(k_surface) == 0.) top_connected_r(KoR(k_surface)) = .true.
       if (PoR(k_surface) == 1.) bot_connected_r(KoR(k_surface)) = .true.
@@ -2095,6 +2112,7 @@ logical function ndiff_unit_tests_discontinuous(verbose)
   integer, dimension(ns)      :: KoL, KoR
   real, dimension(ns)         :: PoL, PoR
   real, dimension(ns-1)       :: hEff, Flx
+  real                        :: Pos, dRho
   type(neutral_diffusion_CS)  :: CS
   type(EOS_type),     pointer :: EOS       ! Structure for linear equation of state
   type(remapping_CS), pointer :: remap_CS  ! Remapping control structure (PLM)
@@ -2262,26 +2280,26 @@ logical function ndiff_unit_tests_discontinuous(verbose)
   ALLOCATE(CS%ndiff_aux_CS)
   call set_ndiff_aux_params(CS%ndiff_aux_CS, deg = 1, max_iter = 10, drho_tol = 0., xtol = 0., EOS = EOS)
   ! Tests using Newton's method
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/35., 0./), -1., 1., 0.), &
-            "Temperature stratified (Newton) "))
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/20., 0./), (/34., 2./),  -2., 2., 0.), &
-            "Salinity stratified    (Newton) "))
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/34., 2./), -1., 1., 0.), &
-            "Temp/Salt stratified   (Newton) "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/35., 0./), -1., 1., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Temperature stratified (Newton) "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/20., 0./), (/34., 2./),  -2., 2., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Salinity stratified    (Newton) "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/34., 2./), -1., 1., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Temp/Salt stratified   (Newton) "))
   call set_ndiff_aux_params(CS%ndiff_aux_CS, force_brent = .true.)
   ! Tests using Brent's method
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/35., 0./), -1., 1., 0.), &
-            "Temperature stratified (Brent)  "))
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/20., 0./), (/34., 2./),  -2., 2., 0.), &
-            "Salinity stratified    (Brent)  "))
-  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. (test_rnp(0.5,refine_nondim_position( &
-            CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/34., 2./), -1., 1., 0.), &
-            "Temp/Salt stratified   (Brent)  "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/35., 0./), -1., 1., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Temperature stratified (Brent)  "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/20., 0./), (/34., 2./),  -2., 2., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Salinity stratified    (Brent)  "))
+  call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/34., 2./), -1., 1., 0., Pos, dRho)
+  ndiff_unit_tests_discontinuous = ndiff_unit_tests_discontinuous .or. &
+                                   (test_rnp(0.5, Pos, "Temp/Salt stratified   (Brent)  "))
   deallocate(EOS)
 
   if (.not. ndiff_unit_tests_discontinuous) write(*,*) 'Pass'
