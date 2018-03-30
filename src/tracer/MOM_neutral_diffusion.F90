@@ -368,6 +368,9 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, CS)
                 CS%Pint(i,j+1,:), CS%Tint(i,j+1,:), CS%Sint(i,j+1,:), CS%dRdT(i,j+1,:), CS%dRdS(i,j+1,:), &
                 CS%vPoL(i,J,:), CS%vPoR(i,J,:), CS%vKoL(i,J,:), CS%vKoR(i,J,:), CS%vhEff(i,J,:) )
       else
+        if (CS%debug) then
+          print *, "Finding Neutral positions at i,j:", i,j
+        endif
         call find_neutral_surface_positions_discontinuous(CS, G%ke, CS%ns(i,j)+CS%ns(i,j+1), &
             CS%Pint(i,j,:), h(i,j,:), CS%T_i(i,j,:,:), CS%S_i(i,j,:,:),                      &
             CS%dRdT_i(i,j,:,:), CS%dRdS_i(i,j,:,:), CS%stable_cell(i,j,:),                   &
@@ -1149,8 +1152,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   integer :: k, kl_left_0, kl_right_0
   real    :: dRho, dRhoTop, dRhoBot, hL, hR
   real    :: last_refine_drho_left, last_refine_drho_right, drho_refine
-  integer :: lastK_left, lastK_right
-  real    :: lastP_left, lastP_right
+  integer :: lastK_left, lastK_right, lastK_searched_left, lastK_searched_right
+  real    :: lastP_left, lastP_right, lastP_searched_left, lastP_searched_right
   real    :: min_bound
   real    :: T_other, S_other, P_other, dRdT_other, dRdS_other
   logical, dimension(nk) :: top_connected_l, top_connected_r
@@ -1191,6 +1194,9 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   last_refine_drho_left = 0.
   last_refine_drho_right = 0.
 
+  lastK_searched_left = 0 ; lastK_searched_right = 0
+  lastP_searched_left = -1. ; lastP_searched_right = -1.
+
   ! Loop over each neutral surface, working from top to bottom
   neutral_surfaces: do k_surface = 1, ns
     ! Potential density difference, rho(kr) - rho(kl)
@@ -1230,14 +1236,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       S_other = Sr(kl_right, ki_right)
       dRdT_other = dRdT_r(kl_right, ki_right)
       dRdS_other = dRdS_r(kl_right, ki_right)
-!      if (CS%refine_position .and. (lastK_left == kl_left)) then
-!        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_l(kl_left),       &
-!                         Pres_l(kl_left+1), ppoly_T_l(kl_left,:), ppoly_S_l(kl_left,:), lastP_left, dRhoTop)
-!        dRhoTop = dRhoTop - last_refine_drho_left
-!      else
-        dRhoTop = calc_drho(Tl(kl_left,1), Sl(kl_left,1), dRdT_l(kl_left,1), dRdS_l(kl_left,1), T_other, S_other,  &
-                            dRdT_other, dRdS_other)
-!      endif
+      dRhoTop = calc_drho(Tl(kl_left,1), Sl(kl_left,1), dRdT_l(kl_left,1), dRdS_l(kl_left,1), T_other, S_other,  &
+                          dRdT_other, dRdS_other)
       ! Potential density difference, rho(kl) - rho(kl_right,ki_right) (will be positive)
       dRhoBot = calc_drho(Tl(kl_left,2), Sl(kl_left,2), dRdT_l(kl_left,2), dRdS_l(kl_left,2), &
                           T_other, S_other, dRdT_other, dRdS_other)
@@ -1261,8 +1261,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if ( CS%refine_position .and. search_layer ) then
         min_bound = 0.
         if (k_surface > 1) then
-          if ( KoL(k_surface) == KoL(k_surface-1) ) then
-            min_bound = PoL(k_surface-1)
+          if ( KoL(k_surface) == lastK_searched_left ) then
+            min_bound = lastP_searched_left
           else
             last_refine_drho_left = 0.
           endif
@@ -1278,6 +1278,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
           last_refine_drho_left = 0.
         endif
       endif
+      lastK_searched_left = kl_left
+      lastP_searched_left = PoL(k_surface)
       if (PoL(k_surface) == 0.) top_connected_l(KoL(k_surface)) = .true.
       if (PoL(k_surface) == 1.) bot_connected_l(KoL(k_surface)) = .true.
       call increment_interface(nk, kl_right, ki_right, stable_r, reached_bottom, searching_right_column, searching_left_column)
@@ -1293,17 +1295,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       S_other = Sl(kl_left, ki_left)
       dRdT_other = dRdT_l(kl_left, ki_left)
       dRdS_other = dRdS_l(kl_left, ki_left)
-      ! Interpolate for the neutral surface position within the right column, layer krm1
-      ! Potential density difference, rho(kr-1) - rho(kl) (should be negative)
-
-!      if (CS%refine_position .and. (lastK_right == kl_right)) then
-!        call drho_at_pos(CS%ndiff_aux_CS, T_other, S_other, dRdT_other, dRdS_other, Pres_r(kl_right),          &
-!                         Pres_l(kl_right+1), ppoly_T_r(kl_right,:), ppoly_S_r(kl_right,:), lastP_right, dRhoTop)
-!        dRhoTop = dRhoTop - last_refine_drho_right
-!      else
-        dRhoTop = calc_drho(Tr(kl_right,1), Sr(kl_right,1), dRdT_r(kl_right,1), dRdS_r(kl_right,1), &
-                    T_other, S_other, dRdT_other, dRdS_other)
-!      endif
+      dRhoTop = calc_drho(Tr(kl_right,1), Sr(kl_right,1), dRdT_r(kl_right,1), dRdS_r(kl_right,1), &
+                          T_other, S_other, dRdT_other, dRdS_other)
       dRhoBot = calc_drho(Tr(kl_right,2), Sr(kl_right,2), dRdT_r(kl_right,2), dRdS_r(kl_right,2), &
                   T_other, S_other, dRdT_other, dRdS_other)
       if (CS%debug) then
@@ -1325,8 +1318,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
       if ( CS%refine_position .and. search_layer) then
         min_bound = 0.
         if (k_surface > 1) then
-          if ( KoR(k_surface) == KoR(k_surface-1) ) then
-            min_bound = PoR(k_surface-1)
+          if ( KoR(k_surface) == lastK_searched_right ) then
+            min_bound = lastP_searched_right
           else
             last_refine_drho_right = 0.
           endif
@@ -1342,6 +1335,8 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
           last_refine_drho_right = 0.
         endif
       endif
+      lastK_searched_right = kl_right
+      lastP_searched_right = PoR(k_surface)
       if (PoR(k_surface) == 0.) top_connected_r(KoR(k_surface)) = .true.
       if (PoR(k_surface) == 1.) bot_connected_r(KoR(k_surface)) = .true.
       call increment_interface(nk, kl_left, ki_left, stable_l, reached_bottom, searching_left_column, searching_right_column)
@@ -1352,8 +1347,10 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
     lastK_left = KoL(k_surface)  ; lastP_left = PoL(k_surface)
     lastK_right = KoR(k_surface) ; lastP_right = PoR(k_surface)
 
-    if (CS%debug)  write(*,'(A,I3,A,ES16.6,A,I2,A,ES16.6)') "KoL:", KoL(k_surface), " PoL:", PoL(k_surface), "     KoR:", &
-      KoR(k_surface), " PoR:", PoR(k_surface)
+    if (CS%debug) then
+      write(*,'(A,I3,A,ES16.6,A,I2,A,ES16.6)') "Final KoL:", KoL(k_surface), " PoL:", PoL(k_surface), "     KoR:", &
+                                                KoR(k_surface), " PoR:", PoR(k_surface)
+    endif
     ! Effective thickness
     if (k_surface>1) then
       ! This is useful as a check to make sure that positions are monotonically increasing

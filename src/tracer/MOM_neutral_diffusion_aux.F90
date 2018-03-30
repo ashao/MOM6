@@ -256,7 +256,9 @@ subroutine search_other_column(dRhoTop, dRhoBot, Ptop, Pbot, lastP, lastK, kl, k
       else
         out_K = kl
         out_P = max(interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot ),lastP)
-        search_layer = .true.
+        if (dRhoTop < 0. .and. dRhoBot > 0.) then
+          search_layer = .true.
+        endif
       endif
     else ! Searching across the interface
       if (.not. bot_connected(kl-1) ) then
@@ -291,7 +293,9 @@ subroutine search_other_column(dRhoTop, dRhoBot, Ptop, Pbot, lastP, lastK, kl, k
     else
       out_K = kl
       out_P = max(interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot ),lastP)
-      search_layer = .true.
+      if (dRhoTop < 0. .and. dRhoBot > 0.) then
+        search_layer = .true.
+      endif
     endif
   endif
 
@@ -391,12 +395,19 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
     do_brent = CS%force_brent
   endif
 
+  if (drho_bot == 0.) then
+    pos_out = 1.
+    delta_rho = 0.
+    return
+  endif
+
   ! Calculate the initial values
   call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, min_bound, &
                    delta_rho, P_int, T, S, alpha_avg, beta_avg, delta_T, delta_S)
   if (present(rho_offset)) delta_rho = delta_rho - rho_offset
   delta_rho_init = delta_rho
   if ( ABS(delta_rho_init) <= CS%drho_tol ) then
+    if (CS%debug) write(*,*) "abs(delta_rho <= drho_tol)"
     pos_out = min_bound
     return
   endif
@@ -419,6 +430,10 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
     fa = delta_rho_init ; a = min_bound
     fb = delta_rho_init ; b = min_bound
     fc = drho_bot       ; c = 1.
+    if (.not. ( (fa < 0) .and. (fc > 0.) ) ) then
+      print *, "fa: ", fa, "fc: ", fc
+      stop  "refine_nondim_position: fa and fc must be of opposite sign"
+    endif
     ! Iterate over Newton's method for the function: x0 = x0 - delta_rho/d_delta_rho_dP
     do iter = 1, CS%max_iter
       P_int = P_top*(1. - b) + P_bot*b
@@ -645,6 +660,11 @@ subroutine check_neutral_positions(CS, Ptop_l, Pbot_l, Ptop_r, Pbot_r, PoL, PoR,
 
   delta_rho = 0.5*( (alpha_l + alpha_r)*(Tl - Tr) + (beta_l + beta_r)*(Sl - Sr) )
   write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho
+  if (abs(delta_rho) > CS%drho_tol) then
+    write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho, "<---Surface not neutral"
+  else
+    write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho
+  endif
 
 end subroutine check_neutral_positions
 
