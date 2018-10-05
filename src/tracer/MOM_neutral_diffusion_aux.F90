@@ -112,11 +112,12 @@ subroutine mark_unstable_cells(nk, dRdT, dRdS,T, S, stable_cell, ns)
 end subroutine mark_unstable_cells
 
 !> Increments the interface which was just connected and also set flags if the bottom is reached
-subroutine increment_interface(nk, kl, ki, stable, reached_bottom, searching_this_column, searching_other_column)
+subroutine increment_interface(nk, kl, ki, stable, last_stable_kl, reached_bottom, searching_this_column, searching_other_column)
   integer, intent(in   )                :: nk                     !< Number of vertical levels
   integer, intent(inout)                :: kl                     !< Current layer (potentially updated)
   integer, intent(inout)                :: ki                     !< Current interface
   logical, dimension(nk), intent(in   ) :: stable                 !< True if the cell is stably stratified
+  integer, intent(inout)                :: last_stable_kl         !< Index of last stable cell in this column
   logical, intent(inout)                :: reached_bottom         !< Updated when kl == nk and ki == 2
   logical, intent(inout)                :: searching_this_column  !< Updated when kl == nk and ki == 2
   logical, intent(inout)                :: searching_other_column !< Updated when kl == nk and ki == 2
@@ -126,17 +127,17 @@ subroutine increment_interface(nk, kl, ki, stable, reached_bottom, searching_thi
     ki = 2
   elseif ((ki == 2) .and. (kl < nk) ) then
     do k = kl+1,nk
-      if (stable(kl)) then
+      if (stable(k)) then
+        last_stable_kl = kl
         kl = k
         ki = 1
-        exit
+        return
       endif
-      ! If we did not find another stable cell, then the current cell is essentially the bottom
-      ki = 2
-      reached_bottom = .true.
-      searching_this_column = .true.
-      searching_other_column = .false.
     enddo
+    ! If we did not find another stable cell, then the current interface is essentially the bottom
+    reached_bottom = .true.
+    searching_this_column = .true.
+    searching_other_column = .false.
   elseif ((kl == nk) .and. (ki==2)) then
     reached_bottom = .true.
     searching_this_column = .true.
@@ -215,90 +216,162 @@ subroutine drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppol
 end subroutine drho_at_pos
 
 !> Searches the "other" (searched) column for the position of the neutral surface
-subroutine search_other_column(dRhoTop, dRhoBot, Ptop, Pbot, lastP, lastK, kl, kl_0, ki, &
-                               top_connected, bot_connected, out_P, out_K, search_layer)
+subroutine search_other_column(dRhoTop, dRhoBot, dRhoTopm1, Ptop, Pbot, last_stable_kl, kl, kl0, ki, &
+                               at_top, top_connected, bot_connected, out_P, out_K, search_layer, scenario)
   real,                  intent(in   ) :: dRhoTop        !< Density difference across top interface
-  real,                  intent(in   ) :: dRhoBot        !< Density difference across top interface
+  real,                  intent(in   ) :: dRhoTopm1      !< Density difference across discontinuity at top
+  real,                  intent(in   ) :: dRhoBot        !< Density difference across bottom interface
   real,                  intent(in   ) :: Ptop           !< Pressure at top interface
   real,                  intent(in   ) :: Pbot           !< Pressure at bottom interface
-  real,                  intent(in   ) :: lastP          !< Last position connected in the searched column
-  integer,               intent(in   ) :: lastK          !< Last layer connected in the searched column
+  integer,               intent(in   ) :: last_stable_kl !< Last layer connected in the searched column
   integer,               intent(in   ) :: kl             !< Layer in the searched column
-  integer,               intent(in   ) :: kl_0           !< Layer in the searched column
+  integer,               intent(in   ) :: kl0            !< Layer in the searched column
   integer,               intent(in   ) :: ki             !< Interface of the searched column
+  logical,               intent(in   ) :: at_top         !< True if at the very top of the algorithm
   logical, dimension(:), intent(inout) :: top_connected  !< True if the top interface was pointed to
   logical, dimension(:), intent(inout) :: bot_connected  !< True if the top interface was pointed to
   real,                  intent(  out) :: out_P          !< Position within searched column
   integer,               intent(  out) :: out_K          !< Layer within searched column
   logical,               intent(  out) :: search_layer   !< Neutral surface within cell
+  integer,               intent(  out) :: scenario       !< For debugging purposes, which scenario was encounted
+
+!  search_layer = .false.
+!  if (dRhoTop < 0. .and. dRhoBot > 0.) then
+!    out_K = kl
+!    out_P = interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot)
+!    search_layer = .true.
+!  elseif (dRhoTop == 0. .and. dRhoBot == 0.) then
+!    if (top_connected(kl)) then
+!      out_K = kl
+!      out_P = 1.
+!    else
+!      out_K = kl
+!      out_P = 0.
+!    endif
+!  elseif (dRhoTop == 0.) then
+!    out_K = kl
+!    out_P = 0.
+!  elseif (dRhoBot == 0.) then
+!    out_K = kl
+!    out_P = 1.
+!!  elseif (dRhoTop < 0. .and. dRhoBot < 0.) then
+!!    out_K = kl
+!!    out_P = 1.
+!  elseif (dRhoTop > 0. .and. dRhoBot > 0.) then
+!    out_K = kl
+!    out_P = 0.
+!  else
+!    print *, dRhoTop, dRhoBot
+!    stop "Unexpected case in search_other_column"
+!  endif
 
   search_layer = .false.
-  if (kl > kl_0) then ! Away from top cell
-    if (kl == lastK) then ! Searching in the same layer
-      if (dRhoTop > 0.) then
-        if (lastK == kl) then
-          out_P = lastP
-        else
-          out_P = 0.
-        endif
-        out_K = kl
-!        out_P = max(0.,lastP) ; out_K = kl
-      elseif ( dRhoTop == dRhoBot ) then
-        if (top_connected(kl)) then
-          out_P = 1. ; out_K = kl
-        else
-          out_P = max(0.,lastP) ; out_K = kl
-        endif
-      elseif (dRhoTop >= dRhoBot) then
-        out_P = 1. ; out_K = kl
-      elseif (dRhoTop < 0. .and. dRhoBot < 0.)then
-        out_P = 1. ; out_K = kl
-      else
-        out_K = kl
-        out_P = max(interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot ),lastP)
-        if (dRhoTop < 0. .and. dRhoBot > 0.) then
-          search_layer = .true.
-        endif
-      endif
-    else ! Searching across the interface
-      if (.not. bot_connected(kl-1) ) then
-        out_K = kl-1
-        out_P = 1.
-      else
-        out_K = kl
-        out_P = 0.
-      endif
-    endif
-  else ! At the top cell
-    if (ki == 1) then
-      out_P = 0. ; out_K = kl
-    elseif (dRhoTop > 0.) then
-      if (lastK == kl) then
-        out_P = lastP
-      else
-        out_P = 0.
-      endif
-      out_K = kl
-!      out_P = max(0.,lastP) ; out_K = kl
-    elseif ( dRhoTop == dRhoBot ) then
-      if (top_connected(kl)) then
-        out_P = 1. ; out_K = kl
-      else
-        out_P = max(0.,lastP) ; out_K = kl
-      endif
-    elseif (dRhoTop >= dRhoBot) then
-      out_P = 1. ; out_K = kl
-    elseif (dRhoTop < 0. .and. dRhoBot < 0.)then
-      out_P = 1. ; out_K = kl
+  out_P = -9999.
+  out_K = -9999.
+  scenario = 99
+  ! For most cases, out_K will be in the layer searched
+  out_K = kl
+  if ((at_top .and. ki == 1)) then ! At the top
+    out_P = 0.
+    scenario = 0
+  elseif (dRhoTop < 0. .and. dRhoBot > 0.) then
+    out_K = kl
+    out_P = interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot)
+    search_layer = .true.
+    scenario = 1
+  elseif (dRhoTopm1 == 0. .and. .not. bot_connected(last_stable_kl)) then
+    scenario = 2
+    out_K = last_stable_kl
+    out_P = 1.
+  elseif (dRhoTop == 0. .and. dRhoBot == 0.) then
+    if (top_connected(kl)) then
+      out_P = 1.
+      scenario = 3
     else
-      out_K = kl
-      out_P = max(interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot ),lastP)
-      if (dRhoTop < 0. .and. dRhoBot > 0.) then
-        search_layer = .true.
-      endif
+      out_P = 0.
+      scenario = 4
     endif
+  elseif (dRhoTop > 0. .and. dRhoBot > 0.) then
+    out_P = 0.
+    scenario = 5
+  elseif (dRhoBot < 0. .and. dRhoBot < 0.) then
+    out_P = 1.
+    scenario = 6
+  elseif (dRhoTop == 0.) then
+    out_P = 0.
+    scenario = 7
+  elseif (dRhoBot == 0.) then
+    out_P = 1.
+    scenario = 8
+  else
+    print *, dRhoTop, dRhoBot
+    stop "ICEBERG RIGHT AHEAD"
   endif
 
+!  if (dRhoTop < 0. .and. dRhoBot > 0.) then
+!    out_K = kl
+!    out_P = interpolate_for_nondim_position( dRhoTop, Ptop, dRhoBot, Pbot)
+!    search_layer = .true.
+!  elseif (.not. (at_top .and. ki == 1)) then ! Away from top cell
+!    if (dRhoTop > 0.) then
+!      if (bot_connected(kl)) then
+!        out_P = 1.
+!        out_K = kl
+!        scenario = 1
+!      else
+!        out_P = 0.
+!        out_K = kl
+!        scenario = 2
+!      endif
+!    ! Case where the layer is perfectly unstratified
+!    elseif ( dRhoTop == 0. .and. dRhoBot == 0.) then
+!      if (kl == 1) then
+!        if (top_connected(kl)) then
+!          out_P = 1. ; out_K = kl
+!          scenario = 3
+!        else
+!          out_P = 0. ; out_K = kl
+!          scenario = 4
+!        endif
+!      elseif (.not. bot_connected(last_stable_kl) .and. dRhoTopm1 == 0.) then
+!        out_P = 1. ; out_K = last_stable_kl
+!        scenario = 5
+!      elseif (top_connected(kl)) then
+!        out_P = 1. ; out_K = kl
+!        scenario = 6
+!      else
+!        out_P = 0. ; out_K = kl
+!        scenario = 7
+!      endif
+!    elseif (dRhoTop == 0.) then
+!      out_K = kl
+!      out_P = 0.
+!      scenario = 8
+!    elseif (dRhoBot == 0.) then
+!      out_K = kl
+!      out_P = 1.
+!      scenario = 9
+!    elseif (dRhoTop >= dRhoBot) then
+!      out_P = 1. ; out_K = kl
+!      scenario = 10
+!    elseif (dRhoTop < 0. .and. dRhoBot < 0.)then
+!      out_P = 1. ; out_K = kl
+!      scenario = 11
+!    else
+!      print *, dRhoTop, dRhoBot
+!      stop "Something weird happened in search_other_column"
+!    endif
+!  elseif (ki == 1 ) then! At the top cell
+!    out_P = 0. ; out_K = kl
+!    scenario = 12
+!  else
+!    print *, dRhoTop, dRhoBot
+!    stop "Something weird happened in search_other_column"
+!  endif
+!
+!  if (out_P < 0. .or. out_K < 0) then
+!    stop "out_P and out_K weren never set"
+!  endif
 end subroutine search_other_column
 
 !> Returns the non-dimensional position between Pneg and Ppos where the
@@ -432,7 +505,9 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
     fc = drho_bot       ; c = 1.
     if (.not. ( (fa < 0) .and. (fc > 0.) ) ) then
       print *, "fa: ", fa, "fc: ", fc
-      stop  "refine_nondim_position: fa and fc must be of opposite sign"
+      print *,  "refine_nondim_position: fa and fc must be of opposite sign"
+      pos_out = min_bound
+      return
     endif
     ! Iterate over Newton's method for the function: x0 = x0 - delta_rho/d_delta_rho_dP
     do iter = 1, CS%max_iter
@@ -659,9 +734,9 @@ subroutine check_neutral_positions(CS, Ptop_l, Pbot_l, Ptop_r, Pbot_r, PoL, PoR,
   endif
 
   delta_rho = 0.5*( (alpha_l + alpha_r)*(Tl - Tr) + (beta_l + beta_r)*(Sl - Sr) )
-  write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho
   if (abs(delta_rho) > CS%drho_tol) then
-    write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho, "<---Surface not neutral"
+    write(*,'(A,ES23.15,A)') "Delta-rho: ", delta_rho, "<---Surface not neutral"
+    call MOM_error(FATAL,"Endpoints of neutral surface not neutrally buoyant")
   else
     write(*,'(A,ES23.15)') "Delta-rho: ", delta_rho
   endif
