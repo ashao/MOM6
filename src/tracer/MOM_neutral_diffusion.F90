@@ -31,58 +31,61 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public neutral_diffusion
-public neutral_diffusion_init
-public neutral_diffusion_end
+public neutral_diffusion, neutral_diffusion_init, neutral_diffusion_end
 public neutral_diffusion_calc_coeffs
 public neutral_diffusion_unit_tests
 
+!> The control structure for the MOM_neutral_diffusion module
 type, public :: neutral_diffusion_CS ; private
-  integer :: nkp1   ! Number of interfaces for a column = nk + 1
-  integer :: nsurf  ! Number of neutral surfaces
-  integer :: deg = 2 ! Degree of polynomial used for reconstructions
-  logical :: continuous_reconstruction = .true.   ! True if using continuous PPM reconstruction at interfaces
+  integer :: nkp1    !< Number of interfaces for a column = nk + 1
+  integer :: nsurf   !< Number of neutral surfaces
+  integer :: deg = 2 !< Degree of polynomial used for reconstructions
+  logical :: continuous_reconstruction = .true. !< True if using continuous PPM reconstruction at interfaces
   logical :: refine_position = .false.
-  logical :: colimit_TS ! If true, limit both T and S flux if one is limited
-  logical :: colimit_passive ! If true, limit passive tracers if T or S is limited
-  logical :: debug = .false.
-  integer :: max_iter ! Maximum number of iterations if refine_position is defined
-  real :: tolerance   ! Convergence criterion representing difference from true neutrality
-  real :: ref_pres    ! Reference pressure, negative if using locally referenced neutral density
+  logical :: colimit_TS      !< If true, limit both T and S flux if one is limited
+  logical :: colimit_passive !< If true, limit passive tracers if T or S is limited
+  logical :: debug = .false. !< Print debugging statements for neutral diffusion
+  integer :: max_iter !< Maximum number of iterations if refine_position is defined
+  real :: tolerance   !< Convergence criterion representing difference from true neutrality
+  real :: ref_pres    !< Reference pressure, negative if using locally referenced neutral density
 
   ! Positions of neutral surfaces in both the u, v directions
-  real,    allocatable, dimension(:,:,:) :: uPoL  ! Non-dimensional position with left layer uKoL-1, u-point
-  real,    allocatable, dimension(:,:,:) :: uPoR  ! Non-dimensional position with right layer uKoR-1, u-point
-  integer, allocatable, dimension(:,:,:) :: uKoL  ! Index of left interface corresponding to neutral surface, u-point
-  integer, allocatable, dimension(:,:,:) :: uKoR  ! Index of right interface corresponding to neutral surface, u-point
-  real,    allocatable, dimension(:,:,:) :: uHeff ! Effective thickness at u-point (H units)
-  real,    allocatable, dimension(:,:,:) :: vPoL  ! Non-dimensional position with left layer uKoL-1, v-point
-  real,    allocatable, dimension(:,:,:) :: vPoR  ! Non-dimensional position with right layer uKoR-1, v-point
-  integer, allocatable, dimension(:,:,:) :: vKoL  ! Index of left interface corresponding to neutral surface, v-point
-  integer, allocatable, dimension(:,:,:) :: vKoR  ! Index of right interface corresponding to neutral surface, v-point
-  real,    allocatable, dimension(:,:,:) :: vHeff ! Effective thickness at v-point (H units)
+  real,    allocatable, dimension(:,:,:) :: uPoL  !< Non-dimensional position with left layer uKoL-1, u-point
+  real,    allocatable, dimension(:,:,:) :: uPoR  !< Non-dimensional position with right layer uKoR-1, u-point
+  integer, allocatable, dimension(:,:,:) :: uKoL  !< Index of left interface corresponding to neutral surface,
+                                                  !! at a u-point
+  integer, allocatable, dimension(:,:,:) :: uKoR  !< Index of right interface corresponding to neutral surface,
+                                                  !! at a u-point
+  real,    allocatable, dimension(:,:,:) :: uHeff !< Effective thickness at u-point (H units)
+  real,    allocatable, dimension(:,:,:) :: vPoL  !< Non-dimensional position with left layer uKoL-1, v-point
+  real,    allocatable, dimension(:,:,:) :: vPoR  !< Non-dimensional position with right layer uKoR-1, v-point
+  integer, allocatable, dimension(:,:,:) :: vKoL  !< Index of left interface corresponding to neutral surface,
+                                                  !! at a v-point
+  integer, allocatable, dimension(:,:,:) :: vKoR  !< Index of right interface corresponding to neutral surface,
+                                                  !! at a v-point
+  real,    allocatable, dimension(:,:,:) :: vHeff !< Effective thickness at v-point (H units)
   ! Coefficients of polynomial reconstructions for temperature and salinity
   real,    allocatable, dimension(:,:,:,:) :: ppoly_coeffs_T !< Polynomial coefficients for temperature
-  real,    allocatable, dimension(:,:,:,:) :: ppoly_coeffs_S !< Polynomial coefficients for temperature
+  real,    allocatable, dimension(:,:,:,:) :: ppoly_coeffs_S !< Polynomial coefficients for salinity
   ! Variables needed for continuous reconstructions
-  real,    allocatable, dimension(:,:,:) :: dRdT ! dRho/dT (kg/m3/degC) at interfaces
-  real,    allocatable, dimension(:,:,:) :: dRdS ! dRho/dS (kg/m3/ppt) at interfaces
-  real,    allocatable, dimension(:,:,:) :: Tint ! Interface T (degC)
-  real,    allocatable, dimension(:,:,:) :: Sint ! Interface S (ppt)
-  real,    allocatable, dimension(:,:,:) :: Pint ! Interface pressure (Pa)
+  real,    allocatable, dimension(:,:,:) :: dRdT !< dRho/dT (kg/m3/degC) at interfaces
+  real,    allocatable, dimension(:,:,:) :: dRdS !< dRho/dS (kg/m3/ppt) at interfaces
+  real,    allocatable, dimension(:,:,:) :: Tint !< Interface T (degC)
+  real,    allocatable, dimension(:,:,:) :: Sint !< Interface S (ppt)
+  real,    allocatable, dimension(:,:,:) :: Pint !< Interface pressure (Pa)
   ! Variables needed for discontinuous reconstructions
-  real,    allocatable, dimension(:,:,:,:) :: T_i     ! Top edge reconstruction of temperature (degC)
-  real,    allocatable, dimension(:,:,:,:) :: S_i     ! Top edge reconstruction of salinity (ppt)
-  real,    allocatable, dimension(:,:,:,:) :: dRdT_i     ! dRho/dT (kg/m3/degC) at top edge
-  real,    allocatable, dimension(:,:,:,:) :: dRdS_i     ! dRho/dS (kg/m3/ppt) at top edge
-  integer, allocatable, dimension(:,:)     :: ns     ! Number of interfacs in a column
-  logical, allocatable, dimension(:,:,:) :: stable_cell  ! True if the cell is stably stratified wrt to the next cell
+  real,    allocatable, dimension(:,:,:,:) :: T_i    !< Top edge reconstruction of temperature (degC)
+  real,    allocatable, dimension(:,:,:,:) :: S_i    !< Top edge reconstruction of salinity (ppt)
+  real,    allocatable, dimension(:,:,:,:) :: dRdT_i !< dRho/dT (kg/m3/degC) at top edge
+  real,    allocatable, dimension(:,:,:,:) :: dRdS_i !< dRho/dS (kg/m3/ppt) at top edge
+  integer, allocatable, dimension(:,:)     :: ns     !< Number of interfacs in a column
+  logical, allocatable, dimension(:,:,:) :: stable_cell !< True if the cell is stably stratified wrt to the next cell
+  type(diag_ctrl), pointer :: diag => NULL() !< A structure that is used to
+                                             !! regulate the timing of diagnostic output.
+  integer :: id_uhEff_2d = -1 !< Diagnostic IDs
+  integer :: id_vhEff_2d = -1 !< Diagnostic IDs
 
-  type(diag_ctrl), pointer :: diag ! structure to regulate output
-  integer :: id_uhEff_2d = -1
-  integer :: id_vhEff_2d = -1
-
-  real    :: C_p ! heat capacity of seawater (J kg-1 K-1)
+  real    :: C_p !< heat capacity of seawater (J kg-1 K-1)
   type(EOS_type), pointer :: EOS !< Equation of state parameters
   type(remapping_CS)       :: remap_CS      !< Remapping control structure used to create sublayers
   type(ndiff_aux_CS_type), pointer :: ndiff_aux_CS !< Store parameters for iteratively finding neutral surface
@@ -90,7 +93,7 @@ end type neutral_diffusion_CS
 
 ! This include declares and sets the variable "version".
 #include "version_variable.h"
-character(len=40)  :: mdl = "MOM_neutral_diffusion" ! module name
+character(len=40)  :: mdl = "MOM_neutral_diffusion" !< module name
 
 contains
 
@@ -390,9 +393,10 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, CS)
     endif
   enddo ; enddo
 
-  ! Continuous reconstructions calculate hEff as the difference between the pressures of the neutral surfaces which
-  ! need to be reconverted to thickness units. The discontinuous version calculates hEff from the fraction of the
-  ! nondimensional fraction of the layer occupied by the
+  ! Continuous reconstructions calculate hEff as the difference between the pressures of the
+  ! neutral surfaces which need to be reconverted to thickness units. The discontinuous version
+  ! calculates hEff from the fraction of the nondimensional fraction of the layer occupied by
+  ! the... (Please finish this thought. -RWH)
   if (CS%continuous_reconstruction) then
     do k = 1, CS%nsurf-1 ; do j = G%jsc, G%jec ; do I = G%isc-1, G%iec
       if (G%mask2dCu(I,j) > 0.) CS%uhEff(I,j,k) = CS%uhEff(I,j,k) * pa_to_H
@@ -406,14 +410,14 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, h, T, S, CS)
     hEff_sum(:,:) = 0.
     do k = 1,CS%nsurf-1 ; do j=G%jsc,G%jec ; do i=G%isc-1,G%iec
       hEff_sum(i,j) = hEff_sum(i,j) + CS%uhEff(i,j,k)
-    enddo ; enddo; enddo
+    enddo ; enddo ; enddo
     call post_data(CS%id_uhEff_2d, hEff_sum, CS%diag)
   endif
   if (CS%id_vhEff_2d>0) then
     hEff_sum(:,:) = 0.
     do k = 1,CS%nsurf-1 ; do j=G%jsc-1,G%jec ; do i=G%isc,G%iec
       hEff_sum(i,j) = hEff_sum(i,j) + CS%vhEff(i,j,k)
-    enddo ; enddo; enddo
+    enddo ; enddo ; enddo
     call post_data(CS%id_vhEff_2d, hEff_sum, CS%diag)
   endif
 
@@ -426,7 +430,8 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
   real, dimension(SZI_(G),SZJ_(G),SZK_(G)),  intent(in)    :: h      !< Layer thickness (H units)
   real, dimension(SZIB_(G),SZJ_(G)),         intent(in)    :: Coef_x !< dt * Kh * dy / dx at u-points (m^2)
   real, dimension(SZI_(G),SZJB_(G)),         intent(in)    :: Coef_y !< dt * Kh * dx / dy at u-points (m^2)
-  real,                                      intent(in)    :: dt     !< Tracer time step * I_numitts (I_numitts in tracer_hordiff)
+  real,                                      intent(in)    :: dt     !< Tracer time step * I_numitts
+                                                                     !! (I_numitts in tracer_hordiff)
   type(tracer_registry_type),                pointer       :: Reg    !< Tracer registry
   type(neutral_diffusion_CS),                pointer       :: CS     !< Neutral diffusion control structure
 
@@ -508,6 +513,11 @@ subroutine neutral_diffusion(G, GV, h, Coef_x, Coef_y, dt, Reg, CS)
           S_vFlx(I,j,k) = vFlx(I,j,k)
         enddo ; enddo ; enddo
       endif
+    ! for diagnostics
+    if (tracer%id_dfxy_conc    > 0 .or. tracer%id_dfxy_cont > 0 .or. tracer%id_dfxy_cont_2d > 0 .or. &
+       tracer%id_dfx_2d       > 0 .or. tracer%id_dfy_2d > 0) then
+       Idt              = 1.0/dt
+       tendency(:,:,:)  = 0.0
     endif
 
   enddo ! Loop over tracer registry
@@ -935,8 +945,8 @@ end function fvlsq_slope
 
 
 !> Returns positions within left/right columns of combined interfaces using continuous reconstructions of T/S
-subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdSl, Pr, Tr, Sr, dRdTr, dRdSr, PoL, &
-                                                     PoR, KoL, KoR, hEff)
+subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdSl, Pr, Tr, Sr, &
+                                                     dRdTr, dRdSr, PoL, PoR, KoL, KoR, hEff)
   integer,                    intent(in)    :: nk    !< Number of levels
   real, dimension(nk+1),      intent(in)    :: Pl    !< Left-column interface pressure (Pa)
   real, dimension(nk+1),      intent(in)    :: Tl    !< Left-column interface potential temperature (degC)
@@ -948,8 +958,10 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
   real, dimension(nk+1),      intent(in)    :: Sr    !< Right-column interface salinity (ppt)
   real, dimension(nk+1),      intent(in)    :: dRdTr !< Left-column dRho/dT (kg/m3/degC)
   real, dimension(nk+1),      intent(in)    :: dRdSr !< Left-column dRho/dS (kg/m3/ppt)
-  real, dimension(2*nk+2),    intent(inout) :: PoL   !< Fractional position of neutral surface within layer KoL of left column
-  real, dimension(2*nk+2),    intent(inout) :: PoR   !< Fractional position of neutral surface within layer KoR of right column
+  real, dimension(2*nk+2),    intent(inout) :: PoL   !< Fractional position of neutral surface within
+                                                     !! layer KoL of left column
+  real, dimension(2*nk+2),    intent(inout) :: PoR   !< Fractional position of neutral surface within
+                                                     !! layer KoR of right column
   integer, dimension(2*nk+2), intent(inout) :: KoL   !< Index of first left interface above neutral surface
   integer, dimension(2*nk+2), intent(inout) :: KoR   !< Index of first right interface above neutral surface
   real, dimension(2*nk+1),    intent(inout) :: hEff  !< Effective thickness between two neutral surfaces (Pa)
@@ -1115,10 +1127,10 @@ end subroutine find_neutral_surface_positions_continuous
 
 !> Higher order version of find_neutral_surface_positions. Returns positions within left/right columns
 !! of combined interfaces using intracell reconstructions of T/S
-subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,                                                   &
-                Pres_l, hcol_l, Tl, Sl, dRdT_l, dRdS_l, stable_l, Pres_r, hcol_r, Tr, Sr, dRdT_r, dRdS_r, stable_r,   &
+subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns, Pres_l, hcol_l, Tl, Sl, &
+                dRdT_l, dRdS_l, stable_l, Pres_r, hcol_r, Tr, Sr, dRdT_r, dRdS_r, stable_r, &
                 PoL, PoR, KoL, KoR, hEff, ppoly_T_l, ppoly_S_l, ppoly_T_r, ppoly_S_r)
-  type(neutral_diffusion_CS)                :: CS  !< Neutral diffusion control structure
+  type(neutral_diffusion_CS), intent(inout) :: CS  !< Neutral diffusion control structure
   integer,                    intent(in)    :: nk        !< Number of levels
   integer,                    intent(in)    :: ns        !< Number of neutral surfaces
   real, dimension(nk+1),      intent(in)    :: Pres_l    !< Left-column interface pressure (Pa)
@@ -1142,10 +1154,14 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   integer, dimension(4*nk),   intent(inout) :: KoL       !< Index of first left interface above neutral surface
   integer, dimension(4*nk),   intent(inout) :: KoR       !< Index of first right interface above neutral surface
   real, dimension(4*nk-1),    intent(inout) :: hEff      !< Effective thickness between two neutral surfaces (Pa)
-  real, dimension(nk,CS%deg+1),  optional, intent(in) :: ppoly_T_l !< Left-column coefficients of T reconstruction
-  real, dimension(nk,CS%deg+1),  optional, intent(in) :: ppoly_S_l !< Left-column coefficients of S reconstruction
-  real, dimension(nk,CS%deg+1),  optional, intent(in) :: ppoly_T_r !< Right-column coefficients of T reconstruction
-  real, dimension(nk,CS%deg+1),  optional, intent(in) :: ppoly_S_r !< Right-column coefficients of S reconstruction
+  real, dimension(nk,CS%deg+1), &
+                    optional, intent(in)    :: ppoly_T_l !< Left-column coefficients of T reconstruction
+  real, dimension(nk,CS%deg+1), &
+                    optional, intent(in)    :: ppoly_S_l !< Left-column coefficients of S reconstruction
+  real, dimension(nk,CS%deg+1), &
+                    optional, intent(in)    :: ppoly_T_r !< Right-column coefficients of T reconstruction
+  real, dimension(nk,CS%deg+1), &
+                    optional, intent(in)    :: ppoly_S_r !< Right-column coefficients of S reconstruction
 
   ! Local variables
   integer :: k_surface              ! Index of neutral surface
@@ -1170,8 +1186,9 @@ subroutine find_neutral_surface_positions_discontinuous(CS, nk, ns,             
   bot_connected_l(:) = .false. ; bot_connected_r(:) = .false.
 
   ! Check to make sure that polynomial reconstructions were passed if refine_pos defined)
-  if(CS%refine_position) then
-    if (.not. ( present(ppoly_T_l) .and. present(ppoly_S_l) .and. present(ppoly_T_r) .and. present(ppoly_S_r) )) &
+  if (CS%refine_position) then
+    if (.not. ( present(ppoly_T_l) .and. present(ppoly_S_l) .and. &
+                present(ppoly_T_r) .and. present(ppoly_S_r) ) ) &
         call MOM_error(FATAL, "fine_neutral_surface_positions_discontinuous: refine_pos is requested, but " //&
                               "polynomial coefficients not available for T and S")
   endif
@@ -1468,9 +1485,9 @@ real function absolute_position(n,ns,Pint,Karr,NParr,k_surface)
   real,    intent(in) :: Pint(n+1)    !< Position of interfaces (Pa)
   integer, intent(in) :: Karr(ns)     !< Index of interface above position
   real,    intent(in) :: NParr(ns)    !< Non-dimensional position within layer Karr(:)
-
+  integer, intent(in) :: k_surface    !< k-interface to query
   ! Local variables
-  integer :: k_surface, k
+  integer :: k
 
   k = Karr(k_surface)
   if (k>n) stop 'absolute_position: k>nk is out of bounds!'
@@ -1519,7 +1536,8 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
   real,                         intent(in)    :: h_neglect !< A negligibly small width for the
                                              !! purpose of cell reconstructions
                                              !! in the same units as h0.
-  type(remapping_CS), optional, intent(in)    :: remap_CS
+  type(remapping_CS), optional, intent(in)    :: remap_CS !< Remapping control structure used
+                                             !! to create sublayers
   real,               optional, intent(in)    :: h_neglect_edge !< A negligibly small width
                                              !! for the purpose of edge value calculations
                                              !! in the same units as h0.
@@ -1586,7 +1604,7 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
         dT_bottom = T_right_bottom - T_left_bottom
         dT_ave = 0.5 * ( dT_top + dT_bottom )
         dT_layer = T_right_layer - T_left_layer
-        if (signum(1.,dT_top) * signum(1.,dT_bottom) <= 0. .or. signum(1.,dT_ave) * signum(1.,dT_layer) <= 0. ) then
+        if (signum(1.,dT_top) * signum(1.,dT_bottom) <= 0. .or. signum(1.,dT_ave) * signum(1.,dT_layer) <= 0.) then
           dT_ave = 0.
         else
           dT_ave = dT_layer
@@ -1594,10 +1612,12 @@ subroutine neutral_surface_flux(nk, nsurf, deg, hl, hr, Tl, Tr, PiL, PiR, KoL, K
         Flx(k_sublayer) = dT_ave * hEff(k_sublayer)
       else ! Discontinuous reconstruction
         ! Calculate tracer values on left and right side of the neutral surface
-        call neutral_surface_T_eval(nk, nsurf, k_sublayer, KoL, PiL, Tl, Tid_l, deg, iMethod, ppoly_r_coeffs_l,     &
-                              T_left_top, T_left_bottom, T_left_sub, T_left_top_int, T_left_bot_int, T_left_layer)
-        call neutral_surface_T_eval(nk, nsurf, k_sublayer, KoR, PiR, Tr, Tid_r, deg, iMethod, ppoly_r_coeffs_r,     &
-                              T_right_top, T_right_bottom, T_right_sub, T_right_top_int, T_right_bot_int, T_right_layer)
+        call neutral_surface_T_eval(nk, nsurf, k_sublayer, KoL, PiL, Tl, Tid_l, deg, iMethod, &
+                                    ppoly_r_coeffs_l, T_left_top, T_left_bottom, T_left_sub, &
+                                    T_left_top_int, T_left_bot_int, T_left_layer)
+        call neutral_surface_T_eval(nk, nsurf, k_sublayer, KoR, PiR, Tr, Tid_r, deg, iMethod, &
+                                    ppoly_r_coeffs_r, T_right_top, T_right_bottom, T_right_sub, &
+                                    T_right_top_int, T_right_bot_int, T_right_layer)
 
         dT_top      = T_right_top     - T_left_top
         dT_bottom   = T_right_bottom  - T_left_bottom
@@ -1741,7 +1761,7 @@ end subroutine ppm_left_right_edge_values
 
 !> Returns true if unit tests of neutral_diffusion functions fail. Otherwise returns false.
 logical function neutral_diffusion_unit_tests(verbose)
-  logical, intent(in) :: verbose
+  logical, intent(in) :: verbose !< If true, write results to stdout
 
   neutral_diffusion_unit_tests = .false. .or. &
     ndiff_unit_tests_continuous(verbose) .or. ndiff_unit_tests_discontinuous(verbose)
@@ -1751,7 +1771,7 @@ end function neutral_diffusion_unit_tests
 
 !> Returns true if unit tests of neutral_diffusion functions fail. Otherwise returns false.
 logical function ndiff_unit_tests_continuous(verbose)
-  logical, intent(in) :: verbose !< It true, write results to stdout
+  logical, intent(in) :: verbose !< If true, write results to stdout
   ! Local variables
   integer, parameter         :: nk = 4
   real, dimension(nk+1)      :: TiL, TiR1, TiR2, TiR4, Tio ! Test interface temperatures
@@ -2029,9 +2049,9 @@ logical function ndiff_unit_tests_discontinuous(verbose)
   real, dimension(ns)         :: PoL, PoR
   real, dimension(ns-1)       :: hEff, Flx
   real                        :: Pos, dRho
-  type(neutral_diffusion_CS)  :: CS
-  type(EOS_type),     pointer :: EOS       ! Structure for linear equation of state
-  type(remapping_CS), pointer :: remap_CS  ! Remapping control structure (PLM)
+  type(neutral_diffusion_CS)  :: CS        !< Neutral diffusion control structure
+  type(EOS_type),     pointer :: EOS       !< Structure for linear equation of state
+  type(remapping_CS), pointer :: remap_CS  !< Remapping control structure (PLM)
   real, dimension(nk,2)       :: poly_T_l, poly_T_r, poly_S,  poly_slope    ! Linear reconstruction for T
   real, dimension(nk,2)       :: dRdT, dRdS
   logical, dimension(nk)      :: stable_l, stable_r
@@ -2090,7 +2110,7 @@ logical function ndiff_unit_tests_discontinuous(verbose)
                                    (/0.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 1.0/), & ! pR
                                    (/0.0, 5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0, 0.0, 5.0, 0.0/), & ! hEff
                                    'Right column slightly cooler')
-  Tl = (/18.,14.,10./) ; Tr = (/20.,16.,12./) ;
+  Tl = (/18.,14.,10./) ; Tr = (/20.,16.,12./)
   call build_reconstructions_1d( remap_CS, nk, hL, Tl, poly_T_l, TiL, poly_slope, iMethod, h_neglect, h_neglect_edge )
   call build_reconstructions_1d( remap_CS, nk, hR, Tr, poly_T_r, TiR, poly_slope, iMethod, h_neglect, h_neglect_edge )
   call mark_unstable_cells( nk, dRdT, dRdS, Til, Sil, stable_l, ns_l )
@@ -2194,7 +2214,7 @@ logical function ndiff_unit_tests_discontinuous(verbose)
   allocate(EOS)
   call EOS_manual_init(EOS, form_of_EOS = EOS_LINEAR, dRho_dT = -1., dRho_dS = 2.)
   ! Unit tests for refine_nondim_position
-  ALLOCATE(CS%ndiff_aux_CS)
+  allocate(CS%ndiff_aux_CS)
   call set_ndiff_aux_params(CS%ndiff_aux_CS, deg = 1, max_iter = 10, drho_tol = 0., xtol = 0., EOS = EOS)
   ! Tests using Newton's method
   call refine_nondim_position( CS%ndiff_aux_CS, 20., 35., -1., 2., 0., 1., (/21., -2./), (/35., 0./), -1., 1., 0., Pos, dRho)
@@ -2309,9 +2329,11 @@ logical function test_ifndp(verbose, rhoNeg, Pneg, rhoPos, Ppos, Ptrue, title)
     if (test_ifndp) stdunit = 0 ! In case of wrong results, write to error stream
     write(stdunit,'(a)') title
     if (test_ifndp) then
-      write(stdunit,'(4(x,a,f20.16),2(x,a,1pe22.15),x,a)') 'r1=',rhoNeg,'p1=',Pneg,'r2=',rhoPos,'p2=',Ppos,'pRet=',Pret,'pTrue=',Ptrue,'WRONG!'
+      write(stdunit,'(4(x,a,f20.16),2(x,a,1pe22.15),x,a)') &
+            'r1=',rhoNeg,'p1=',Pneg,'r2=',rhoPos,'p2=',Ppos,'pRet=',Pret,'pTrue=',Ptrue,'WRONG!'
     else
-      write(stdunit,'(4(x,a,f20.16),2(x,a,1pe22.15))') 'r1=',rhoNeg,'p1=',Pneg,'r2=',rhoPos,'p2=',Ppos,'pRet=',Pret,'pTrue=',Ptrue
+      write(stdunit,'(4(x,a,f20.16),2(x,a,1pe22.15))') &
+            'r1=',rhoNeg,'p1=',Pneg,'r2=',rhoPos,'p2=',Ppos,'pRet=',Pret,'pTrue=',Ptrue
     endif
   endif
 
@@ -2340,10 +2362,12 @@ logical function test_data1d(verbose, nk, Po, Ptrue, title)
     do k = 1,nk
       if (Po(k) /= Ptrue(k)) then
         test_data1d = .true.
-        write(stdunit,'(a,i2,2(x,a,f20.16),x,a,1pe22.15,x,a)') 'k=',k,'Po=',Po(k),'Ptrue=',Ptrue(k),'err=',Po(k)-Ptrue(k),'WRONG!'
+        write(stdunit,'(a,i2,2(x,a,f20.16),x,a,1pe22.15,x,a)') &
+              'k=',k,'Po=',Po(k),'Ptrue=',Ptrue(k),'err=',Po(k)-Ptrue(k),'WRONG!'
       else
         if (verbose) &
-          write(stdunit,'(a,i2,2(x,a,f20.16),x,a,1pe22.15)') 'k=',k,'Po=',Po(k),'Ptrue=',Ptrue(k),'err=',Po(k)-Ptrue(k)
+          write(stdunit,'(a,i2,2(x,a,f20.16),x,a,1pe22.15)') &
+                'k=',k,'Po=',Po(k),'Ptrue=',Ptrue(k),'err=',Po(k)-Ptrue(k)
       endif
     enddo
   endif
@@ -2383,7 +2407,8 @@ logical function test_data1di(verbose, nk, Po, Ptrue, title)
 
 end function test_data1di
 
-!> Returns true if output of find_neutral_surface_positions() does not match correct values, and conditionally writes results to stream
+!> Returns true if output of find_neutral_surface_positions() does not match correct values,
+!! and conditionally writes results to stream
 logical function test_nsp(verbose, ns, KoL, KoR, pL, pR, hEff, KoL0, KoR0, pL0, pR0, hEff0, title)
   logical,                    intent(in) :: verbose !< If true, write results to stdout
   integer,                    intent(in) :: ns    !< Number of surfaces
@@ -2457,21 +2482,21 @@ end function compare_nsp_row
 
 !> Compares output position from refine_nondim_position with an expected value
 logical function test_rnp(expected_pos, test_pos, title)
-  real,             intent(in) :: expected_pos
-  real,             intent(in) :: test_pos
-  character(len=*), intent(in) :: title
+  real,             intent(in) :: expected_pos !< The expected position
+  real,             intent(in) :: test_pos !< The position returned by the code
+  character(len=*), intent(in) :: title    !< A label for this test
   ! Local variables
   integer :: stdunit = 6 ! Output to standard error
   test_rnp = expected_pos /= test_pos
   if (test_rnp) then
     write(stdunit,'(A, f20.16, " .neq. ", f20.16, " <-- WRONG")') title, expected_pos, test_pos
   else
-    write(stdunit,'(A, f20.16, " .eq.  ", f20.16)') title, expected_pos, test_pos
+    write(stdunit,'(A, f20.16, " ==  ", f20.16)') title, expected_pos, test_pos
   endif
 end function test_rnp
 !> Deallocates neutral_diffusion control structure
 subroutine neutral_diffusion_end(CS)
-  type(neutral_diffusion_CS), pointer :: CS
+  type(neutral_diffusion_CS), pointer :: CS  !< Neutral diffusion control structure
 
   if (associated(CS)) deallocate(CS)
 

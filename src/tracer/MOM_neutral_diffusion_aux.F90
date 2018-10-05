@@ -20,6 +20,7 @@ public refine_nondim_position
 public check_neutral_positions
 public kahan_sum
 
+!> The control structure for this module
 type, public :: ndiff_aux_CS_type ; private
   integer :: nterm        !< Number of terms in polynomial (deg+1)
   integer :: max_iter     !< Maximum number of iterations
@@ -27,10 +28,9 @@ type, public :: ndiff_aux_CS_type ; private
   real :: xtol            !< Criterion for how much position changes (nondim)
   real :: ref_pres        !< Determines whether a constant reference pressure is used everywhere or locally referenced
                           !< density is done. ref_pres <-1 is the latter, ref_pres >= 0. otherwise
-  logical :: force_brent = .false.  !< Use Brent's method instead of Newton even when second derivatives are available
-  logical :: debug
+  logical :: force_brent = .false. !< Use Brent's method instead of Newton even when second derivatives are available
+  logical :: debug        !< If true, write verbose debugging messages and checksusm
   type(EOS_type), pointer :: EOS !< Pointer to equation of state used in the model
-
 end type ndiff_aux_CS_type
 
 contains
@@ -175,7 +175,7 @@ subroutine drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppol
   real, dimension(CS%nterm), intent(in)  :: ppoly_T   !< Coefficients of T reconstruction
   real, dimension(CS%nterm), intent(in)  :: ppoly_S   !< Coefficients of S reconstruciton
   real,                   intent(in)  :: x0        !< Nondimensional position to evaluate
-  real,                   intent(out) :: delta_rho
+  real,                   intent(out) :: delta_rho !< The density difference from a reference value
   real,         optional, intent(out) :: P_out         !< Pressure at point x0
   real,         optional, intent(out) :: T_out         !< Temperature at point x0
   real,         optional, intent(out) :: S_out         !< Salinity at point x0
@@ -405,8 +405,10 @@ real function interpolate_for_nondim_position(dRhoNeg, Pneg, dRhoPos, Ppos)
   else ! dRhoPos - dRhoNeg < 0
     interpolate_for_nondim_position = 0.5
   endif
-  if ( interpolate_for_nondim_position < 0. ) stop 'interpolate_for_nondim_position: Houston, we have a problem! Pint < Pneg'
-  if ( interpolate_for_nondim_position > 1. ) stop 'interpolate_for_nondim_position: Houston, we have a problem! Pint > Ppos'
+  if ( interpolate_for_nondim_position < 0. ) &
+    stop 'interpolate_for_nondim_position: Houston, we have a problem! Pint < Pneg'
+  if ( interpolate_for_nondim_position > 1. ) &
+    stop 'interpolate_for_nondim_position: Houston, we have a problem! Pint > Ppos'
 end function interpolate_for_nondim_position
 
 !> Use root-finding methods to find where dRho = 0, based on the equation of state and the polynomial
@@ -588,7 +590,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
         fa = fb
         fb = fc
         fc = fa
-      end if
+      endif
       tol = 2. * machep * abs ( sb ) + CS%xtol
       m = 0.5 * ( c - sb )
       if ( abs ( m ) <= tol .or. fb == 0. ) then
@@ -607,12 +609,12 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
           r = fb / fc
           p = s0 * ( 2. * m * q * ( q - r ) - ( sb - sa ) * ( r - 1. ) )
           q = ( q - 1. ) * ( r - 1. ) * ( s0 - 1. )
-        end if
+        endif
         if ( 0. < p ) then
           q = - q
         else
           p = - p
-        end if
+        endif
         s0 = e
         e = d
         if ( 2. * p < 3. * m * q - abs ( tol * q ) .and. &
@@ -621,17 +623,17 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
         else
           e = m
           d = e
-        end if
-      end if
+        endif
+      endif
       sa = sb
       fa = fb
       if ( tol < abs ( d ) ) then
         sb = sb + d
-      else if ( 0. < m ) then
+      elseif ( 0. < m ) then
         sb = sb + tol
       else
         sb = sb - tol
-      end if
+      endif
       call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, &
                        sb, fb)
 
@@ -642,7 +644,7 @@ subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, 
         fc = fa
         e = sb - sa
         d = e
-      end if
+      endif
     enddo
     ! Modified from original to ensure that the minimum is found
     fa = ABS(fa) ; fb = ABS(fb) ; fc = ABS(fc)
