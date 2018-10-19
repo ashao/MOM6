@@ -341,22 +341,26 @@ end function interpolate_for_nondim_position
 !! to see if it it diverges outside the interval. In that case (or in the case that second derivatives are not
 !! available), Brent's method is used following the implementation found at
 !! https://people.sc.fsu.edu/~jburkardt/f_src/brent/brent.f90
-real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, &
-                                     ppoly_T, ppoly_S, drho_top, drho_bot, min_bound)
-  type(ndiff_aux_CS_type),  intent(in) :: CS        !< Control structure with parameters for this module
-  real,                     intent(in) :: T_ref     !< Temperature of the neutral surface at the searched from interface
-  real,                     intent(in) :: S_ref     !< Salinity of the neutral surface at the searched from interface
-  real,                     intent(in) :: alpha_ref !< dRho/dT of the neutral surface at the searched from interface
-  real,                     intent(in) :: beta_ref  !< dRho/dS of the neutral surface at the searched from interface
-  real,                     intent(in) :: P_top     !< Pressure at the top interface in the layer to be searched
-  real,                     intent(in) :: P_bot     !< Pressure at the bottom interface in the layer to be searched
-  real, dimension(:),       intent(in) :: ppoly_T   !< Coefficients of the order N polynomial reconstruction of T within
+subroutine refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, &
+                                  ppoly_T, ppoly_S, drho_top, drho_bot, min_bound, neutral_pos, drho_at_neutral_pos, &
+                                  drho_offset)
+  type(ndiff_aux_CS_type), intent(in)  :: CS        !< Control structure with parameters for this module
+  real,                    intent(in)  :: T_ref     !< Temperature of the neutral surface at the searched from interface
+  real,                    intent(in)  :: S_ref     !< Salinity of the neutral surface at the searched from interface
+  real,                    intent(in)  :: alpha_ref !< dRho/dT of the neutral surface at the searched from interface
+  real,                    intent(in)  :: beta_ref  !< dRho/dS of the neutral surface at the searched from interface
+  real,                    intent(in)  :: P_top     !< Pressure at the top interface in the layer to be searched
+  real,                    intent(in)  :: P_bot     !< Pressure at the bottom interface in the layer to be searched
+  real, dimension(:),      intent(in)  :: ppoly_T   !< Coefficients of the order N polynomial reconstruction of T within
                                                     !! the layer to be searched.
-  real, dimension(:),       intent(in) :: ppoly_S   !< Coefficients of the order N polynomial reconstruction of T within
+  real, dimension(:),      intent(in)  :: ppoly_S   !< Coefficients of the order N polynomial reconstruction of T within
                                                     !! the layer to be searched.
-  real,                     intent(in) :: drho_top  !< Delta rho at top interface (or previous position in cell
-  real,                     intent(in) :: drho_bot  !< Delta rho at bottom interface
-  real,                     intent(in) :: min_bound !< Lower bound of position, also serves as the initial guess
+  real,                    intent(in)  :: drho_top  !< Delta rho at top interface (or previous position in cell
+  real,                    intent(in)  :: drho_bot  !< Delta rho at bottom interface
+  real,                    intent(in)  :: min_bound !< Lower bound of position, also serves as the initial guess
+  real,                    intent(out) :: neutral_pos         !< Nondimensional position of the neutral surface
+  real,                    intent(out) :: drho_at_neutral_pos !< Delta Rho across the neutral surface 
+  real, optional,          intent(in)  :: drho_offset         !< Offset delta_rho by some amount 
 
   ! Local variables
   integer :: form_of_EOS
@@ -366,7 +370,6 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
   real :: delta_rho, d_delta_rho_dP ! Terms for the Newton iteration
   real :: P_int, P_min, P_ref ! Interpolated pressure
   real :: delta_rho_init, delta_rho_final
-  real :: neg_x, neg_fun
   real :: T, S, alpha, beta, alpha_avg, beta_avg
   ! Newton's Method with variables
   real :: dT_dP, dS_dP, delta_T, delta_S, delta_P
@@ -380,7 +383,7 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
   machep = EPSILON(machep)
   if (CS%ref_pres>=0.) P_ref = CS%ref_pres
   delta_P = P_bot-P_top
-  refine_nondim_position = min_bound
+  neutral_pos = min_bound
 
   call extract_member_EOS(CS%EOS, form_of_EOS = form_of_EOS)
   do_newton = (form_of_EOS == EOS_LINEAR) .or. (form_of_EOS == EOS_TEOS10) .or. (form_of_EOS == EOS_WRIGHT)
@@ -393,19 +396,18 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
   ! Calculate the initial values
   call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, min_bound, &
                    delta_rho, P_int, T, S, alpha_avg, beta_avg, delta_T, delta_S)
+  ! An offset might need to be applied to the delta_rho calculation if the previous position within a layer
+  ! had a delta rho that was slightly positive. If the previous delta rho was zero
+  if (present(drho_offset)) delta_rho = delta_rho - MAX(0.,drho_offset)
   delta_rho_init = delta_rho
   if ( ABS(delta_rho_init) <= CS%drho_tol ) then
-    refine_nondim_position = min_bound
+    neutral_pos = min_bound
     return
   endif
   if (ABS(drho_bot) <= CS%drho_tol) then
-    refine_nondim_position = 1.
+    neutral_pos = 1.
     return
   endif
-
-  ! Set the initial values to ensure that the algorithm returns a 'negative' value
-  neg_fun = delta_rho
-  neg_x = min_bound
 
   if (CS%debug) then
     write (*,*) "------"
@@ -415,7 +417,7 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
   ! For now only linear, Wright, and TEOS-10 equations of state have functions providing second derivatives and
   ! thus can use Newton's method for the equation of state
   if (do_newton) then
-    refine_nondim_position = min_bound
+    neutral_pos = min_bound
     ! Set lower bound of pressure
     P_min = P_top*(1.-min_bound) + P_bot*(min_bound)
     fa = delta_rho_init ; a = min_bound
@@ -446,7 +448,7 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
         ! Newton step update
         P_int = P_int - (fb / d_delta_rho_dP)
         ! This line is equivalent to the next
-        ! refine_nondim_position = (P_top-P_int)/(P_top-P_bot)
+        ! neutral_pos = (P_top-P_int)/(P_top-P_bot)
         b_last = b
         b = (P_int-P_top)/delta_P
         ! Test to see if it fell out of the bracketing interval. If so, take a bisection step
@@ -456,22 +458,14 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
       endif
       call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S,   &
                        b, fb, P_int, T, S, alpha_avg, beta_avg, delta_T, delta_S)
+      if (present(drho_offset)) delta_rho = delta_rho - MAX(0.,drho_offset)
       if (CS%debug) write(*,'(A,I3.3,X,ES23.15,X,ES23.15)') "Iteration, b, fb: ", iter, b, fb
 
-      if (fb < 0. .and. fb > neg_fun) then
-        neg_fun = fb
-        neg_x = b
-      endif
-
-      ! For the logic to find neutral surfaces to work properly, the function needs to converge to zero
-      !  or a small negative value
-      if ((fb <= 0.) .and. (fb >= -CS%drho_tol)) then
-        refine_nondim_position = b
+      if (ABS(fb) <= CS%drho_tol) then
         exit
       endif
       ! Exit if method has stalled out
       if ( ABS(b-b_last)<=CS%xtol ) then
-        refine_nondim_position = b
         exit
       endif
 
@@ -484,16 +478,12 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
         fa = delta_rho
       endif
     enddo
-    refine_nondim_position = b
-    delta_rho = fb
-  endif
-  if (delta_rho > 0.) then
-    refine_nondim_position = neg_x
-    delta_rho = neg_fun
+    neutral_pos = b
+    drho_at_neutral_pos = fb
   endif
   ! Do Brent if analytic second derivatives don't exist
   if (do_brent) then
-    sa = max(refine_nondim_position,min_bound) ; fa = delta_rho
+    sa = max(neutral_pos,min_bound) ; fa = delta_rho
     sb = 1. ; fb = drho_bot
     c = sa ; fc = fa ; e = sb - sa; d = e
 
@@ -553,6 +543,7 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
       endif
       call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, &
                        sb, fb)
+      if (present(drho_offset)) delta_rho = delta_rho - MAX(0.,drho_offset)
       if ( ( 0. < fb .and. 0. < fc ) .or. &
            ( fb <= 0. .and. fc <= 0. ) ) then
         c = sa
@@ -563,57 +554,58 @@ real function refine_nondim_position(CS, T_ref, S_ref, alpha_ref, beta_ref, P_to
     enddo
     ! Modified from original to ensure that the minimum is found
     fa = ABS(fa) ; fb = ABS(fb) ; fc = ABS(fc)
-    delta_rho = MIN(fa, fb, fc)
+    drho_at_neutral_pos = MIN(fa, fb, fc)
 
     if (fb==delta_rho) then
-      refine_nondim_position = max(sb,min_bound)
+      neutral_pos = max(sb,min_bound)
     elseif (fa==delta_rho) then
-      refine_nondim_position = max(sa,min_bound)
+      neutral_pos = max(sa,min_bound)
     elseif (fc==delta_rho) then
-      refine_nondim_position = max(c, min_bound)
+      neutral_pos = max(c, min_bound)
     endif
   endif
 
+  if (ABS(drho_at_neutral_pos) > CS%drho_tol) then
+    write(*,*) "drho tol exceeded", drho_at_neutral_pos
+  endif
   ! Make sure that the result is bounded between 0 and 1
-  if (refine_nondim_position>1.) then
+  if (neutral_pos>1.) then
     if (CS%debug) then
       write (*,*) "T, T Poly Coeffs: ", T, ppoly_T
       write (*,*) "S, S Poly Coeffs: ", S, ppoly_S
       write (*,*) "T_ref, alpha_ref: ", T_ref, alpha_ref
       write (*,*) "S_ref, beta_ref : ", S_ref, beta_ref
       write (*,*) "x0: ", min_bound
-      write (*,*) "refine_nondim_position: ", refine_nondim_position
+      write (*,*) "neutral_pos: ", neutral_pos
     endif
-    call MOM_error(WARNING, "refine_nondim_position>1.")
-    refine_nondim_position = 1.
+    call MOM_error(WARNING, "neutral_pos>1.")
+    neutral_pos = 1.
   endif
 
-  if (refine_nondim_position<min_bound) then
+  if (neutral_pos<min_bound) then
     if (CS%debug) then
       write (*,*) "T, T Poly Coeffs: ", T, ppoly_T
       write (*,*) "S, S Poly Coeffs: ", S, ppoly_S
       write (*,*) "T_ref, alpha_ref: ", T_ref, alpha_ref
       write (*,*) "S_ref, beta_ref : ", S_ref, beta_ref
       write (*,*) "x0: ", min_bound
-      write (*,*) "refine_nondim_position: ", refine_nondim_position
+      write (*,*) "neutral_pos: ", neutral_pos
     endif
-    call MOM_error(WARNING, "refine_nondim_position<min_bound.")
-    refine_nondim_position = min_bound
+    call MOM_error(WARNING, "neutral_pos<min_bound.")
+    neutral_pos = min_bound
   endif
 
   if (CS%debug) then
-    call drho_at_pos(CS, T_ref, S_ref, alpha_ref, beta_ref, P_top, P_bot, ppoly_T, ppoly_S, &
-                     refine_nondim_position, delta_rho)
-    write (*,*) "End delta_rho: ", delta_rho
-    write (*,*) "x0, delta_x: ", min_bound, refine_nondim_position-min_bound
-    write (*,*) "refine_nondim_position: ", refine_nondim_position
+    write (*,*) "End delta_rho: ", drho_at_neutral_pos
+    write (*,*) "x0, delta_x: ", min_bound, neutral_pos-min_bound
+    write (*,*) "neutral_pos: ", neutral_pos
     write (*,*) "Iterations: ", iter
     write (*,*) "T_poly_coeffs: ", ppoly_T
     write (*,*) "S_poly_coeffs: ", ppoly_S
     write (*,*) "******"
   endif
 
-end function refine_nondim_position
+end subroutine refine_nondim_position
 
 subroutine check_neutral_positions(CS, Ptop_l, Pbot_l, Ptop_r, Pbot_r, PoL, PoR, Tl_coeffs, Tr_coeffs, &
                                  Sl_coeffs, Sr_coeffs)
@@ -653,7 +645,7 @@ subroutine check_neutral_positions(CS, Ptop_l, Pbot_l, Ptop_r, Pbot_r, PoL, PoR,
 
 end subroutine check_neutral_positions
 
-!> Do a compensated sum to account for roundoff level
+!> Do a compensated sum to account for roundoff in running sums
 subroutine kahan_sum(sum, summand, c)
   real, intent(inout) :: sum      !< Running sum
   real, intent(in   ) :: summand  !< Term to be added
