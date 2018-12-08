@@ -44,6 +44,8 @@ type, public :: dye_tracer_CS ; private
   real, allocatable, dimension(:) :: dye_source_maxlat !< Maximum latitude of region dye will be injected.
   real, allocatable, dimension(:) :: dye_source_mindepth !< Minimum depth of region dye will be injected, in Z.
   real, allocatable, dimension(:) :: dye_source_maxdepth !< Maximum depth of region dye will be injected, in Z.
+  real, allocatable, dimension(:) :: dye_decay_days  !< Decay time scale of dye (in days)
+  real, allocatable, dimension(:) :: dye_decay_rate  !< Decay rate of dye (in s^-1) calculated from dye_decay_days
   type(tracer_registry_type), pointer :: tr_Reg => NULL() !< A pointer to the tracer registry
   real, pointer :: tr(:,:,:,:) => NULL() !< The array of tracers used in this subroutine, in g m-3?
 
@@ -102,7 +104,9 @@ function register_dye_tracer(HI, GV, US, param_file, CS, tr_Reg, restart_CS)
            CS%dye_source_minlat(CS%ntr), &
            CS%dye_source_maxlat(CS%ntr), &
            CS%dye_source_mindepth(CS%ntr), &
-           CS%dye_source_maxdepth(CS%ntr))
+           CS%dye_source_maxdepth(CS%ntr), &
+           CS%dye_decay_days(CS%ntr), &
+           CS%dye_decay_rate(CS%ntr))
   allocate(CS%ind_tr(CS%ntr))
   allocate(CS%tr_desc(CS%ntr))
 
@@ -148,6 +152,13 @@ function register_dye_tracer(HI, GV, US, param_file, CS, tr_Reg, restart_CS)
   if (minval(CS%dye_source_maxdepth(:)) < -1.e29*US%m_to_Z) &
     call MOM_error(FATAL, "register_dye_tracer: Not enough values provided for DYE_SOURCE_MAXDEPTH ")
 
+  CS%dye_decay_days(:) = -1.
+  call get_param(param_file, mdl, "DYE_DECAY_DAYS", CS%dye_decay_days, &
+                 "The exponential decay timescale for dyes (in days)", &
+                 units="days", default = 0.)
+  if (minval(CS%dye_decay_days(:)) < 0.) &
+    call MOM_error(FATAL, "register_dye_tracer: Not enough values provided for DYE_SOURCE_MAXDEPTH ")
+
   allocate(CS%tr(isd:ied,jsd:jed,nz,CS%ntr)) ; CS%tr(:,:,:,:) = 0.0
 
   do m = 1, CS%ntr
@@ -171,6 +182,15 @@ function register_dye_tracer(HI, GV, US, param_file, CS, tr_Reg, restart_CS)
     if (CS%coupled_tracers) &
       CS%ind_tr(m) = aof_set_coupler_flux(trim(var_name)//'_flux', &
           flux_type=' ', implementation=' ', caller="register_dye_tracer")
+
+    ! Convert decay rate from seconds to days )
+    if (CS%dye_decay_days(m)> 0.) then
+      CS%dye_decay_rate(m)=1./(86400.0*CS%dye_decay_days(m))
+    elseif (CS%dye_decay_days(m) == 0.) then
+      CS%dye_decay_rate(m) = 0.
+    else
+      call MOM_error(FATAL, "register_dye_tracer: CS%dye_decay_days is negative but must be a positive number")
+    endif
   enddo
 
   CS%tr_Reg => tr_Reg
@@ -297,6 +317,15 @@ subroutine dye_tracer_column_physics(h_old, h_new, ea, eb, fluxes, dt, G, GV, CS
       call tracer_vertdiff(h_old, ea, eb, dt, CS%tr(:,:,:,m), G, GV)
     enddo
   endif
+
+  ! Decay tracer (limit decay rate to 1/dt - just in case)
+  do m=1,CS%ntr
+    do k=1,nz ; do j=js,je ; do i=is,ie
+      if (CS%dye_decay_rate(m)>0.) then
+        CS%tr(i,j,k,m) = G%mask2dT(i,j)*max(1.-dt*CS%dye_decay_rate(m),0.)*CS%tr(i,j,k,m) ! Safest
+      endif
+    enddo ; enddo ; enddo
+  enddo
 
   do m=1,CS%ntr
     do j=G%jsd,G%jed ; do i=G%isd,G%ied
