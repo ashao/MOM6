@@ -130,6 +130,8 @@ use MOM_offline_main,          only : offline_redistribute_residual, offline_dia
 use MOM_offline_main,          only : offline_fw_fluxes_into_ocean, offline_fw_fluxes_out_ocean
 use MOM_offline_main,          only : offline_advection_layer, offline_transport_end
 use MOM_ALE,                   only : ale_offline_tracer_final, ALE_main_offline
+! Data streaming modules
+use MOM_data_client,           only : data_client_type, MOM_data_client_init, streamout_data
 
 implicit none ; private
 
@@ -356,6 +358,9 @@ type, public :: MOM_control_struct ; private
   type(ODA_CS), pointer :: odaCS => NULL() !< a pointer to the control structure for handling
                                 !! ensemble model state vectors and data assimilation
                                 !! increments and priors
+
+  type(data_client_type), pointer :: data_client_CS !< Pointer to data client control structure  
+  logical                :: streamdata !< If true, call routines that stream data into/out of the model
 end type MOM_control_struct
 
 public initialize_MOM, finish_MOM_initialization, MOM_end
@@ -849,6 +854,9 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
     call disable_averaging(CS%diag)
     call cpu_clock_end(id_clock_diagnostics)
   endif
+
+  ! Stream data to a data cliet
+  if (CS%streamdata) call streamout_data(CS%data_client_CS, CS%Time, G, GV) 
 
   ! Accumulate the surface fluxes for assessing conservation
   if (do_thermo .and. fluxes%fluxes_used) &
@@ -1932,6 +1940,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
 
   call callTree_waypoint("MOM parameters read (initialize_MOM)")
 
+  call get_param(param_file, "MOM", "STREAMDATA", CS%streamdata, &
+                "If true, data is streamed out of the model at the end of every forcing dataset.", &
+                default = .false.)
+
   ! Set up the model domain and grids.
 #ifdef SYMMETRIC_MEMORY_
   symmetric = .true.
@@ -2431,6 +2443,11 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call cpu_clock_end(id_clock_pass_init)
 
   call register_obsolete_diagnostics(param_file, CS%diag)
+  
+  if (CS%streamdata) then
+    call MOM_data_client_init(CS%data_client_CS, GV, CS%diag, CS%Time, US, CS%h, CS%tv%T, CS%tv%S, CS%uhtr, CS%vhtr, &
+                              CS%ave_ssh_ibc)
+  endif
 
   if (use_frazil) then
     if (.not.query_initialized(CS%tv%frazil,"frazil",restart_CSp)) &
