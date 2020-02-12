@@ -7,6 +7,7 @@ module MOM_data_client
   use MOM_grid,                 only : ocean_grid_type
   use MOM_verticalGrid,         only : verticalGrid_type, get_thickness_units
   use MOM_unit_scaling,         only : unit_scale_type
+  use iso_c_binding,            only : c_ptr 
   
   ! This file is part of MOM6. See LICENSE.md for the license.
   
@@ -16,6 +17,8 @@ module MOM_data_client
   !> Contains pointers to arrays in the model that might be potentially streamed
   !! into or out of the model
   type, public :: data_client_type ; private
+
+    type(c_ptr)                     :: data_client    !< Pointer to initialized c++ data client class
   
     real, dimension(:,:,:), pointer :: h   !< Layer thicknesses
     real, dimension(:,:,:), pointer :: T   !< Temperature
@@ -41,6 +44,12 @@ module MOM_data_client
 
   public :: MOM_data_client_init, streamout_data, streamin_data
 
+  interface     
+    function get_ssc_client_ptr() bind(c, name='ssc_constructor') result( ssc_ptr )
+      use iso_c_binding, only : c_ptr
+      type(c_ptr) :: ssc_ptr
+    end function get_ssc_client_ptr
+  end interface
   contains
 
   subroutine MOM_data_client_init(CS, GV, diag, Time, US, h, T, S, uh, vh, SSH)
@@ -73,6 +82,7 @@ module MOM_data_client
     endif
 
     allocate(CS)
+    CS%data_client = get_ssc_client_ptr() 
 
     CS%id_streamin_h = register_diag_field('ocean_model', 'streamin_h', diag%axesTL, Time, &
       'Layer thicknesses passed into MOM6 from the orchestrator', 'm', &
@@ -136,12 +146,12 @@ module MOM_data_client
     nk = GV%ke
 
     time_real = time_type_to_real(Time)
-    if (CS%id_streamout_h > 0)   call send_array_3d(CS%h,   CS%id_streamout_h,   time_real, isc, iec, jsc, jec, nk) 
-    if (CS%id_streamout_T > 0)   call send_array_3d(CS%T,   CS%id_streamout_T,   time_real, isc, iec, jsc, jec, nk)
-    if (CS%id_streamout_S > 0)   call send_array_3d(CS%S,   CS%id_streamout_S,   time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_uh > 0)  call send_array_3d(CS%uh,  CS%id_streamout_uh,  time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_vh > 0)  call send_array_3d(CS%vh,  CS%id_streamout_vh,  time_real, isc, iec, jsc, jec, nk)
-    if (CS%id_streamout_ssh > 0) call put_2d_array_double("ssh",CS%ssh, isc, iec, jsc, jec, .true.)
+    if (CS%id_streamout_h > 0)   call ssc_put_3d_array_double(CS%data_client, "h",   CS%h,  isc, iec, jsc, jec, 1, nk, .true.) 
+    if (CS%id_streamout_T > 0)   call ssc_put_3d_array_double(CS%data_client, "T",   CS%T,  isc, iec, jsc, jec, 1, nk, .true.)
+    if (CS%id_streamout_S > 0)   call ssc_put_3d_array_double(CS%data_client, "S",   CS%S,  isc, iec, jsc, jec, 1, nk, .true.)
+    if (CS%id_streamout_uh > 0)  call ssc_put_3d_array_double(CS%data_client, "uh",  CS%uh, isc, iec, jsc, jec, 1, nk, .true.)
+    if (CS%id_streamout_vh > 0)  call ssc_put_3d_array_double(CS%data_client, "vsh", CS%vh, isc, iec, jsc, jec, 1, nk, .true.)
+    if (CS%id_streamout_ssh > 0) call ssc_put_2d_array_double(CS%data_client, "ssh", CS%ssh, isc, iec, jsc, jec, .true.)
 
   end subroutine streamout_data
   
