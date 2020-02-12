@@ -136,12 +136,12 @@ module MOM_data_client
     nk = GV%ke
 
     time_real = time_type_to_real(Time)
-    !if (CS%id_streamout_h)   call send_array_3d(CS%h,   CS%id_streamout_h,   time_real, isc, iec, jsc, jec, nk) 
-    !if (CS%id_streamout_T)   call send_array_3d(CS%T,   CS%id_streamout_T,   time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_S)   call send_array_3d(CS%S,   CS%id_streamout_S,   time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_uh)  call send_array_3d(CS%uh,  CS%id_streamout_uh,  time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_vh)  call send_array_3d(CS%vh,  CS%id_streamout_vh,  time_real, isc, iec, jsc, jec, nk)
-    !if (CS%id_streamout_ssh) call send_array_2d(CS%ssh, CS%id_streamout_ssh, time_real, isc, iec, jsc, jec)
+    if (CS%id_streamout_h > 0)   call send_array_3d(CS%h,   CS%id_streamout_h,   time_real, isc, iec, jsc, jec, nk) 
+    if (CS%id_streamout_T > 0)   call send_array_3d(CS%T,   CS%id_streamout_T,   time_real, isc, iec, jsc, jec, nk)
+    if (CS%id_streamout_S > 0)   call send_array_3d(CS%S,   CS%id_streamout_S,   time_real, isc, iec, jsc, jec, nk)
+    !if (CS%id_streamout_uh > 0)  call send_array_3d(CS%uh,  CS%id_streamout_uh,  time_real, isc, iec, jsc, jec, nk)
+    !if (CS%id_streamout_vh > 0)  call send_array_3d(CS%vh,  CS%id_streamout_vh,  time_real, isc, iec, jsc, jec, nk)
+    if (CS%id_streamout_ssh > 0) call put_2d_array_double("ssh",CS%ssh, isc, iec, jsc, jec, .true.)
 
   end subroutine streamout_data
   
