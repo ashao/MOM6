@@ -7,7 +7,8 @@ module MOM_data_client
   use MOM_grid,                 only : ocean_grid_type
   use MOM_verticalGrid,         only : verticalGrid_type, get_thickness_units
   use MOM_unit_scaling,         only : unit_scale_type
-  use iso_c_binding,            only : c_ptr 
+  use iso_c_binding,            only : c_ptr, c_associated, c_null_ptr
+  use MOM_coms,                 only : PE_here
   
   ! This file is part of MOM6. See LICENSE.md for the license.
   
@@ -18,7 +19,7 @@ module MOM_data_client
   !! into or out of the model
   type, public :: data_client_type ; private
 
-    type(c_ptr)                     :: data_client    !< Pointer to initialized c++ data client class
+    type(c_ptr)                     :: data_client = C_null_ptr   !< Pointer to initialized c++ data client class
   
     real, dimension(:,:,:), pointer :: h   !< Layer thicknesses
     real, dimension(:,:,:), pointer :: T   !< Temperature
@@ -26,7 +27,7 @@ module MOM_data_client
     real, dimension(:,:,:), pointer :: uh  !< Mass (thickness) transport u-flux
     real, dimension(:,:,:), pointer :: vh  !< Mass (thickness) transport v-flux
     real, dimension(:,:)  , pointer :: SSH !< SSH
-  
+ 
     integer :: id_streamin_h    = -1 !< ID for streaming in h 
     integer :: id_streamin_T    = -1 !< ID for streaming in T
     integer :: id_streamin_S    = -1 !< ID for streaming in S
@@ -45,11 +46,12 @@ module MOM_data_client
   public :: MOM_data_client_init, streamout_data, streamin_data
 
   interface     
-    function get_ssc_client_ptr() bind(c, name='ssc_constructor') result( ssc_ptr )
+    function get_ssc_client_ptr() bind(c, name='GetObject') result( ssc_ptr )
       use iso_c_binding, only : c_ptr
       type(c_ptr) :: ssc_ptr
     end function get_ssc_client_ptr
   end interface
+
   contains
 
   subroutine MOM_data_client_init(CS, GV, diag, Time, US, h, T, S, uh, vh, SSH)
@@ -82,7 +84,8 @@ module MOM_data_client
     endif
 
     allocate(CS)
-    CS%data_client = get_ssc_client_ptr() 
+    CS%data_client = get_ssc_client_ptr()
+    print *, "DATA CLIENT POINTER", loc(CS%data_client), c_associated(CS%data_client)
 
     CS%id_streamin_h = register_diag_field('ocean_model', 'streamin_h', diag%axesTL, Time, &
       'Layer thicknesses passed into MOM6 from the orchestrator', 'm', &
@@ -137,21 +140,34 @@ module MOM_data_client
     type(time_type),         intent(in)    :: Time  !< current model time
     type(ocean_grid_type),   intent(in)    :: G     !< ocean grid structure
     type(verticalGrid_type), intent(in)    :: GV    !< ocean vertical grid structure
+    real, dimension(SZI_(G), SZJ_(G), SZK_(G)) :: temp_t
 
-    integer :: isc, iec, jsc, jec, nk
+    character(len=1024) :: key_suffix
+
+    integer :: isc, iec, jsc, jec, nk, i, j, k
     real :: time_real
 
     isc = G%isc; iec = G%iec
     jsc = G%jsc; jec = G%jec
     nk = GV%ke
-
     time_real = time_type_to_real(Time)
-    if (CS%id_streamout_h > 0)   call ssc_put_3d_array_double(CS%data_client, "h",   CS%h,  isc, iec, jsc, jec, 1, nk, .true.) 
-    if (CS%id_streamout_T > 0)   call ssc_put_3d_array_double(CS%data_client, "T",   CS%T,  isc, iec, jsc, jec, 1, nk, .true.)
-    if (CS%id_streamout_S > 0)   call ssc_put_3d_array_double(CS%data_client, "S",   CS%S,  isc, iec, jsc, jec, 1, nk, .true.)
-    if (CS%id_streamout_uh > 0)  call ssc_put_3d_array_double(CS%data_client, "uh",  CS%uh, isc, iec, jsc, jec, 1, nk, .true.)
-    if (CS%id_streamout_vh > 0)  call ssc_put_3d_array_double(CS%data_client, "vsh", CS%vh, isc, iec, jsc, jec, 1, nk, .true.)
-    if (CS%id_streamout_ssh > 0) call ssc_put_2d_array_double(CS%data_client, "ssh", CS%ssh, isc, iec, jsc, jec, .true.)
+
+    write(key_suffix,("(I5F16.2)")) PE_here(),time_real
+
+    call stripspaces(key_suffix)
+    print *, "DATA CLIENT POINTER", loc(CS%data_client), c_associated(CS%data_client)
+    if (CS%id_streamout_h > 0)   call ssc_put_3d_array_double(CS%data_client, "h"//TRIM(key_suffix)//  char(0),&
+                                                              CS%h, isc, jsc, 1, iec, jec, nk, .true.) 
+    if (CS%id_streamout_T > 0)   call ssc_put_3d_array_double(CS%data_client, "T"//TRIM(key_suffix)//  char(0),&
+                                                              CS%T, isc, jsc, 1, iec, jec, nk, .true.) 
+    if (CS%id_streamout_S > 0)   call ssc_put_3d_array_double(CS%data_client, "S"//TRIM(key_suffix)//  char(0),&
+                                                              CS%S, isc, jsc, 1, iec, jec, nk, .true.) 
+    if (CS%id_streamout_uh > 0)  call ssc_put_3d_array_double(CS%data_client, "uh"//TRIM(key_suffix)// char(0),&
+                                                              CS%uh, isc, jsc, 1, iec, jec, nk, .true.) 
+    if (CS%id_streamout_vh > 0)  call ssc_put_3d_array_double(CS%data_client, "vh"//TRIM(key_suffix)// char(0),&
+                                                              CS%vh, isc, jsc, 1, iec, jec, nk, .true.) 
+    if (CS%id_streamout_ssh > 0) call ssc_put_2d_array_double(CS%data_client, "ssh"//TRIM(key_suffix)//char(0),&
+                                                              CS%ssh, isc, jsc, iec, jec, .true.)
 
   end subroutine streamout_data
   
@@ -178,4 +194,26 @@ module MOM_data_client
 
   end subroutine streamin_data
 
+  subroutine StripSpaces(string)
+  character(len=*) :: string
+  integer :: stringLen
+  integer :: last, actual
+
+  stringLen = len (string)
+  last = 1
+  actual = 1
+
+  do while (actual < stringLen)
+      if (string(last:last) == ' ') then
+          actual = actual + 1
+          string(last:last) = string(actual:actual)
+          string(actual:actual) = ' '
+      else
+          last = last + 1
+          if (actual < last) &
+              actual = last
+      endif
+  end do
+
+  end subroutine
 end module MOM_data_client
