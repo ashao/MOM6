@@ -26,6 +26,32 @@ public restart_init, restart_end, restore_state, register_restart_field
 public save_restart, query_initialized, restart_init_end, vardesc
 public restart_files_exist, determine_is_new_run, is_new_run
 public register_restart_field_as_obsolete
+public save_state_in_memory, restore_state_from_memory
+
+!> A type for making arrays of allocatable 4-d arrays
+type a4d
+  real, dimension(:,:,:,:), allocatable :: A  !< A allocatable to a 4d array
+end type a4d
+
+!> A type for making arrays of allocatable 3-d arrays
+type a3d
+  real, dimension(:,:,:), allocatable :: A  !< A allocatable to a 3d array
+end type a3d
+
+!> A type for making arrays of allocatable 2-d arrays
+type a2d
+  real, dimension(:,:), allocatable :: A  !< A allocatable to a 2d array
+end type a2d
+
+!> A type for making arrays of allocatable 1-d arrays
+type a1d
+  real, dimension(:), allocatable :: A  !< A allocatable to a 1d array
+end type a1d
+
+!> A type for making arrays of allocatable scalars
+type a0d
+  real, allocatable :: A  !< A allocatable to a scalar
+end type a0d
 
 !> A type for making arrays of pointers to 4-d arrays
 type p4d
@@ -100,6 +126,12 @@ type, public :: MOM_restart_CS ; private
   type(p3d), pointer :: var_ptr3d(:) => NULL()
   type(p4d), pointer :: var_ptr4d(:) => NULL()
   !!@}
+  !>@{ Allocatable arrays that can be used to store the state of the model
+  type(a0d), allocatable :: store_0d(:)
+  type(a1d), allocatable :: store_1d(:)
+  type(a2d), allocatable :: store_2d(:)
+  type(a3d), allocatable :: store_3d(:)
+  type(a4d), allocatable :: store_4d(:)
   integer :: max_fields !< The maximum number of restart fields
 end type MOM_restart_CS
 
@@ -775,6 +807,111 @@ function query_initialized_4d_name(f_ptr, name, CS) result(query_initialized)
   endif
 
 end function query_initialized_4d_name
+
+!> Save state of the model in memory
+subroutine save_state_in_memory(CS)
+  type(MOM_restart_CS)  :: CS    !< The control structure returned by a previous call to restart_init.
+
+  integer :: m
+
+  do m=1,CS%novars
+    if ( associated(CS%var_ptr0d(m)%p) ) then
+      if (.not. allocated(CS%store_0d(m)%A)) allocate(CS%store_0d(m)%A)
+      CS%store_0d(m)%A = CS%var_ptr0d(m)%p
+    endif
+    if ( associated(CS%var_ptr1d(m)%p) ) then
+      if (.not. allocated(CS%store_1d(m)%A)) &
+        call alloc_like_1d(CS%var_ptr1d(m)%p,CS%store_1d(m)%A)
+      CS%store_1d(m)%A(:) = CS%var_ptr1d(m)%p(:)
+    endif
+    if ( associated(CS%var_ptr2d(m)%p) ) then
+      if (.not. allocated(CS%store_2d(m)%A)) &
+        call alloc_like_2d(CS%var_ptr2d(m)%p,CS%store_2d(m)%A)
+      CS%store_2d(m)%A(:,:) = CS%var_ptr2d(m)%p(:,:)
+    endif
+    if ( associated(CS%var_ptr3d(m)%p) ) then
+      if (.not. allocated(CS%store_3d(m)%A)) &
+        call alloc_like_3d(CS%var_ptr3d(m)%p,CS%store_3d(m)%A)
+      CS%store_3d(m)%A(:,:,:) = CS%var_ptr3d(m)%p(:,:,:)
+    endif
+    if ( associated(CS%var_ptr4d(m)%p) ) then
+      if (.not. allocated(CS%store_4d(m)%A)) &
+        call alloc_like_4d(CS%var_ptr4d(m)%p,CS%store_4d(m)%A)
+      CS%store_4d(m)%A(:,:,:,:) = CS%var_ptr4d(m)%p(:,:,:,:)
+    endif
+  enddo
+end subroutine save_state_in_memory
+
+!> Restore state from memory from a prior call to save_state_in_memory
+subroutine restore_state_from_memory(CS)
+  type(MOM_restart_CS)  :: CS    !< The control structure returned by a previous call to restart_init.
+
+  integer :: m
+
+  do m=1,CS%novars
+    if ( associated(CS%var_ptr0d(m)%p) ) then
+      CS%var_ptr0d(m)%p = CS%store_0d(m)%A
+    endif
+    if ( associated(CS%var_ptr1d(m)%p) ) then
+      CS%var_ptr1d(m)%p(:) = CS%store_1d(m)%A(:)
+    endif
+    if ( associated(CS%var_ptr2d(m)%p) ) then
+      CS%var_ptr2d(m)%p(:,:) = CS%store_2d(m)%A(:,:)
+    endif
+    if ( associated(CS%var_ptr3d(m)%p) ) then
+      CS%var_ptr3d(m)%p(:,:,:) = CS%store_3d(m)%A(:,:,:)
+    endif
+    if ( associated(CS%var_ptr4d(m)%p) ) then
+      CS%var_ptr4d(m)%p(:,:,:,:) = CS%store_4d(m)%A(:,:,:,:)
+    endif
+  enddo
+end subroutine restore_state_from_memory
+
+!> Allocate a new array like the template (1d)
+subroutine alloc_like_1d( template, new_arr )
+  real, dimension(:)              :: template !< The array whose indices will be used to generate the new array
+  real, dimension(:), allocatable :: new_arr  !< The array to be allocated
+
+  integer :: iL, iU
+  iL = LBOUND(template,1); iU = UBOUND(template,1)
+  allocate(new_arr(iL:iU))
+end subroutine alloc_like_1d
+
+!> Allocate a new array like the template (2d)
+subroutine alloc_like_2d( template, new_arr )
+  real, dimension(:,:)              :: template !< The array whose indices will be used to generate the new array
+  real, dimension(:,:), allocatable :: new_arr  !< The array to be allocated
+
+  integer :: iL, iU, jL, jU
+  iL = LBOUND(template,1); iU = UBOUND(template,1)
+  jL = LBOUND(template,2); jU = UBOUND(template,2)
+  allocate(new_arr(iL:iU,jL:jU))
+end subroutine alloc_like_2d
+
+!> Allocate a new array like the template (3d)
+subroutine alloc_like_3d( template, new_arr )
+  real, dimension(:,:,:)              :: template !< The array whose indices will be used to generate the new array
+  real, dimension(:,:,:), allocatable :: new_arr  !< The array to be allocated
+
+  integer :: iL, iU, jL, jU, kL, kU
+  iL = LBOUND(template,1); iU = UBOUND(template,1)
+  jL = LBOUND(template,2); jU = UBOUND(template,2)
+  kL = LBOUND(template,3); kU = UBOUND(template,3)
+  allocate(new_arr(iL:iU,jL:jU,kL:kU))
+end subroutine alloc_like_3d
+
+!> Allocate a new array like the template (4d)
+subroutine alloc_like_4d( template, new_arr )
+  real, dimension(:,:,:,:)              :: template !< The array whose indices will be used to generate the new array
+  real, dimension(:,:,:,:), allocatable :: new_arr  !< The array to be allocated
+
+  integer :: iL, iU, jL, jU, kL, kU, mL, mU
+  iL = LBOUND(template,1); iU = UBOUND(template,1)
+  jL = LBOUND(template,2); jU = UBOUND(template,2)
+  kL = LBOUND(template,3); kU = UBOUND(template,3)
+  mL = LBOUND(template,4); mU = UBOUND(template,4)
+  allocate(new_arr(iL:iU,jL:jU,kL:kU,mL:mU))
+end subroutine alloc_like_4d
 
 !> save_restart saves all registered variables to restart files.
 subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV)
@@ -1472,6 +1609,11 @@ subroutine restart_init(param_file, CS, restart_root)
   allocate(CS%var_ptr3d(CS%max_fields))
   allocate(CS%var_ptr4d(CS%max_fields))
 
+  allocate(CS%store_0d(CS%max_fields))
+  allocate(CS%store_1d(CS%max_fields))
+  allocate(CS%store_2d(CS%max_fields))
+  allocate(CS%store_3d(CS%max_fields))
+  allocate(CS%store_4d(CS%max_fields))
 end subroutine restart_init
 
 !> Indicate that all variables have now been registered.
