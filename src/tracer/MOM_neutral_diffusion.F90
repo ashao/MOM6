@@ -48,6 +48,7 @@ type, public :: neutral_diffusion_CS ; private
   real :: drho_tol    !< Convergence criterion representing difference from true neutrality
   real :: x_tol       !< Convergence criterion for how small an update of the position can be
   real :: ref_pres    !< Reference pressure, negative if using locally referenced neutral density
+  real :: dRdP        !< A fictitious thermobaricity term to make surface non-neutral
   logical :: interior_only !< If true, only applies neutral diffusion in the ocean interior.
                       !! That is, the algorithm will exclude the surface and bottom boundary layers.
   ! Positions of neutral surfaces in both the u, v directions
@@ -210,6 +211,9 @@ logical function neutral_diffusion_init(Time, G, param_file, diag, EOS, diabatic
                   "Bring down the model if a problem with heff is detected",&
                    default = .true.)
   endif
+  call get_param(param_file, mdl, "NDIFF_DRDP", CS%dRdP, &
+                "A fictitious thermobaricity term to make surfaces non-neutral",&
+                 default = 0.)
 
 !  if (CS%interior_only) then
 !    call extract_diabatic_member(diabatic_CSp, KPP_CSp=CS%KPP_CSp)
@@ -292,9 +296,9 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, US, h, T, S, CS)
   zeta_top(:,:) = 0. ; zeta_bot(:,:) = 1.
 
   ! check if hbl needs to be extracted
+  hbl(:,:) = 100.
+  hbl(4:6,:) = 50.
   if (CS%interior_only) then
-    hbl(:,:) = 100.
-    hbl(4:6,:) = 50.
     if (ASSOCIATED(CS%KPP_CSp)) call KPP_get_BLD(CS%KPP_CSp, hbl, G)
     if (ASSOCIATED(CS%energetic_PBL_CSp)) call energetic_PBL_get_MLD(CS%energetic_PBL_CSp, hbl, G, US)
     call pass_var(hbl,G%Domain)
@@ -425,7 +429,8 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, US, h, T, S, CS)
                 CS%Pint(i,j,:), CS%Tint(i,j,:), CS%Sint(i,j,:), CS%dRdT(i,j,:), CS%dRdS(i,j,:),            &
                 CS%Pint(i+1,j,:), CS%Tint(i+1,j,:), CS%Sint(i+1,j,:), CS%dRdT(i+1,j,:), CS%dRdS(i+1,j,:),  &
                 CS%uPoL(I,j,:), CS%uPoR(I,j,:), CS%uKoL(I,j,:), CS%uKoR(I,j,:), CS%uhEff(I,j,:),           &
-                k_bot(I,j), k_bot(I+1,j), 1.-zeta_bot(I,j), 1.-zeta_bot(I+1,j))
+                CS%dRdP,k_bot(I,j), k_bot(I+1,j), 1.-zeta_bot(I,j), 1.-zeta_bot(I+1,j), &
+                GV%H_to_Pa*hbl(I,j), GV%H_to_Pa*hbl(I+1,j))
       else
         call find_neutral_surface_positions_discontinuous(CS, G%ke,                                            &
             CS%P_i(i,j,:,:), h(i,j,:), CS%T_i(i,j,:,:), CS%S_i(i,j,:,:), CS%ppoly_coeffs_T(i,j,:,:),           &
@@ -446,7 +451,8 @@ subroutine neutral_diffusion_calc_coeffs(G, GV, US, h, T, S, CS)
                 CS%Pint(i,j,:), CS%Tint(i,j,:), CS%Sint(i,j,:), CS%dRdT(i,j,:), CS%dRdS(i,j,:),           &
                 CS%Pint(i,j+1,:), CS%Tint(i,j+1,:), CS%Sint(i,j+1,:), CS%dRdT(i,j+1,:), CS%dRdS(i,j+1,:), &
                 CS%vPoL(i,J,:), CS%vPoR(i,J,:), CS%vKoL(i,J,:), CS%vKoR(i,J,:), CS%vhEff(i,J,:),          &
-                k_bot(i,J), k_bot(i,J+1), 1.-zeta_bot(i,J), 1.-zeta_bot(i,J+1))
+                CS%dRdP,k_bot(i,J), k_bot(i,J+1), 1.-zeta_bot(i,J), 1.-zeta_bot(i,J+1), &
+                GV%H_to_Pa*hbl(i,J), GV%H_to_Pa*hbl(i,J+1))
       else
         call find_neutral_surface_positions_discontinuous(CS, G%ke,                                            &
             CS%P_i(i,j,:,:), h(i,j,:), CS%T_i(i,j,:,:), CS%S_i(i,j,:,:), CS%ppoly_coeffs_T(i,j,:,:),           &
@@ -891,7 +897,7 @@ end function fvlsq_slope
 
 !> Returns positions within left/right columns of combined interfaces using continuous reconstructions of T/S
 subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdSl, Pr, Tr, Sr, &
-                                                     dRdTr, dRdSr, PoL, PoR, KoL, KoR, hEff, bl_kl, bl_kr, bl_zl, bl_zr)
+                                                     dRdTr, dRdSr, PoL, PoR, KoL, KoR, hEff, dRdP_in, bl_kl, bl_kr, bl_zl, bl_zr, hbl_l, hbl_r)
   integer,                    intent(in)    :: nk    !< Number of levels
   real, dimension(nk+1),      intent(in)    :: Pl    !< Left-column interface pressure [Pa]
   real, dimension(nk+1),      intent(in)    :: Tl    !< Left-column interface potential temperature [degC]
@@ -910,17 +916,20 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
   integer, dimension(2*nk+2), intent(inout) :: KoL   !< Index of first left interface above neutral surface
   integer, dimension(2*nk+2), intent(inout) :: KoR   !< Index of first right interface above neutral surface
   real, dimension(2*nk+1),    intent(inout) :: hEff  !< Effective thickness between two neutral surfaces [Pa]
+  real, optional,             intent(in)    :: dRdP_in !< A 'fake' thermobaricity to test mapping onto pressure surfaces
   integer, optional,          intent(in)    :: bl_kl !< Layer index of the boundary layer (left)
   integer, optional,          intent(in)    :: bl_kr !< Layer index of the boundary layer (right)
   real, optional,             intent(in)    :: bl_zl !< Nondimensional position of the boundary layer (left)
   real, optional,             intent(in)    :: bl_zr !< Nondimensional position of the boundary layer (right)
+  real, optional,             intent(in)    :: hbl_l !< Thickness of the boundary layer (left)
+  real, optional,             intent(in)    :: hbl_r !< Thickness of the boundary layer (right)
 
   ! Local variables
   integer :: ns                     ! Number of neutral surfaces
   integer :: k_surface              ! Index of neutral surface
   integer :: kl                     ! Index of left interface
   integer :: kr                     ! Index of right interface
-  real    :: dRdT, dRdS             ! dRho/dT and dRho/dS for the neutral surface
+  real    :: dRdT, dRdS, dRdP       ! dRho/dT and dRho/dS for the neutral surface
   logical :: searching_left_column  ! True if searching for the position of a right interface in the left column
   logical :: searching_right_column ! True if searching for the position of a left interface in the right column
   logical :: reached_bottom         ! True if one of the bottom-most interfaces has been used as the target
@@ -929,10 +938,14 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
   integer :: lastK_left, lastK_right
   real    :: lastP_left, lastP_right
   logical :: interior_limit
+  real    :: hbl_avg
 
-  ns = 2*nk+2
-
+  hbl_avg = 0.
+  if (present(hbl_l) .and. present(hbl_r)) hbl_avg = 0.5*(hbl_l+hbl_r)
+  dRdP = 0.
+  if (present(dRdP_in)) dRdP = dRdP_in
   ! Initialize variables for the search
+  ns = 2*nk+2
   kr = 1 ;
   kl = 1 ;
   lastP_right = 0.
@@ -954,6 +967,7 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
     ! Potential density difference, rho(kr) - rho(kl)
     dRho = 0.5 * ( ( dRdTr(kr) + dRdTl(kl) ) * ( Tr(kr) - Tl(kl) ) &
                  + ( dRdSr(kr) + dRdSl(kl) ) * ( Sr(kr) - Sl(kl) ) )
+    dRho = dRho + (lateral_to_neutral(Pr(kr),Pl(kl),hbl_avg)*dRdP)*( Pr(kr) - Pl(kl) )
     ! Which column has the lighter surface for the current indexes, kr and kl
     if (.not. reached_bottom) then
       if (dRho < 0.) then
@@ -978,9 +992,11 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
       ! Potential density difference, rho(kl-1) - rho(kr) (should be negative)
       dRhoTop = 0.5 * ( ( dRdTl(klm1) + dRdTr(kr) ) * ( Tl(klm1) - Tr(kr) ) &
                      + ( dRdSl(klm1) + dRdSr(kr) ) * ( Sl(klm1) - Sr(kr) ) )
+      dRhoTop = dRhoTop + (lateral_to_neutral(Pl(klm1),Pr(kr),hbl_avg)*dRdP)*( Pl(klm1) - Pr(kr) )
       ! Potential density difference, rho(kl) - rho(kr) (will be positive)
       dRhoBot = 0.5 * ( ( dRdTl(klm1+1) + dRdTr(kr) ) * ( Tl(klm1+1) - Tr(kr) ) &
                       + ( dRdSl(klm1+1) + dRdSr(kr) ) * ( Sl(klm1+1) - Sr(kr) ) )
+      dRhoBot = dRhoBot + (lateral_to_neutral(Pl(klm1+1),Pr(kr),hbl_avg)*dRdP)*( Pl(klm1+1) - Pr(kr) )
 
       ! Because we are looking left, the right surface, kr, is lighter than klm1+1 and should be denser than klm1
       ! unless we are still at the top of the left column (kl=1)
@@ -1021,9 +1037,11 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
       ! Potential density difference, rho(kr-1) - rho(kl) (should be negative)
       dRhoTop = 0.5 * ( ( dRdTr(krm1) + dRdTl(kl) ) * ( Tr(krm1) - Tl(kl) ) &
                      + ( dRdSr(krm1) + dRdSl(kl) ) * ( Sr(krm1) - Sl(kl) ) )
+      dRhoTop = dRhoTop + (lateral_to_neutral(Pr(krm1),Pl(kl),hbl_avg)*dRdP)*( Pr(krm1) - Pl(kl) )
       ! Potential density difference, rho(kr) - rho(kl) (will be positive)
       dRhoBot = 0.5 * ( ( dRdTr(krm1+1) + dRdTl(kl) ) * ( Tr(krm1+1) - Tl(kl) ) &
                    + ( dRdSr(krm1+1) + dRdSl(kl) ) * ( Sr(krm1+1) - Sl(kl) ) )
+      dRhoBot = dRhoBot + (lateral_to_neutral(Pr(krm1+1),Pl(kl),hbl_avg)*dRdP)*( Pr(krm1+1) - Pl(kl) )
 
       ! Because we are looking right, the left surface, kl, is lighter than krm1+1 and should be denser than krm1
       ! unless we are still at the top of the right column (kr=1)
@@ -1095,6 +1113,19 @@ subroutine find_neutral_surface_positions_continuous(nk, Pl, Tl, Sl, dRdTl, dRdS
   enddo neutral_surfaces
 
 end subroutine find_neutral_surface_positions_continuous
+
+real function lateral_to_neutral(P1, P2, bld)
+  real, intent(in) :: P1 !< Current pressure at interface 1 [Pa]
+  real, intent(in) :: P2 !< Current pressure at interface 2 [Pa]
+  real, intent(in) :: bld   !< Pressure at bottom of boundary layer [Pa]
+
+  real :: P_avg
+  P_avg = (P1 + P2)*0.5
+
+  lateral_to_neutral = MAX(0., 1.0 - P_avg/bld)
+
+end function lateral_to_neutral
+
 !> Returns the non-dimensional position between Pneg and Ppos where the
 !! interpolated density difference equals zero.
 !! The result is always bounded to be between 0 and 1.
