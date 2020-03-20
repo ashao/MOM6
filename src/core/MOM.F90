@@ -855,9 +855,6 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
     call cpu_clock_end(id_clock_diagnostics)
   endif
 
-  ! Stream data to a data cliet
-  if (CS%streamdata) call streamout_data(CS%data_client_CS, CS%Time, G, GV) 
-
   ! Accumulate the surface fluxes for assessing conservation
   if (do_thermo .and. fluxes%fluxes_used) &
     call accumulate_net_input(fluxes, sfc_state, CS%tv, fluxes%dt_buoy_accum, &
@@ -1186,6 +1183,9 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
   endif
 
   call cpu_clock_begin(id_clock_thermo)
+
+  if (CS%dt_da > 0.) call apply_increment(CS%da_const_inc, G, dtdia, h, tv%T, tv%S)
+
   if (.not.CS%adiabatic) then
     if (CS%debug) then
       call uvchksum("Pre-diabatic [uv]", u, v, G%HI, haloshift=2, scale=US%L_T_to_m_s)
@@ -1262,6 +1262,7 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
 
     !### Consider moving this up into the if ALE block.
     call postALE_tracer_diagnostics(CS%tracer_Reg, G, GV, CS%diag, dtdia)
+    call send_prior_recv_increment(CS, G, GV, dtdia, h, tv%T, tv%S)
 
     if (CS%debug) then
       call uvchksum("Post-diabatic u", u, v, G%HI, haloshift=2, scale=US%L_T_to_m_s)
@@ -1758,6 +1759,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
                  "can be an integer multiple of the coupling timestep.  By "//&
                  "default DT_THERM is set to DT.", &
                  units="s", scale=US%s_to_T, default=US%T_to_s*CS%dt)
+  call get_param(param, "MOM", "DT_DA", CS%dt_da, &
+                 "Length of time (s) between DA updates", default=-1)
   call get_param(param_file, "MOM", "THERMO_SPANS_COUPLING", CS%thermo_spans_coupling, &
                  "If true, the MOM will take thermodynamic and tracer "//&
                  "timesteps that can be longer than the coupling timestep. "//&
@@ -2445,7 +2448,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call register_obsolete_diagnostics(param_file, CS%diag)
   
   if (CS%streamdata) then
-    call MOM_data_client_init(CS%data_client_CS, GV, CS%diag, CS%Time, US, CS%h, CS%tv%T, CS%tv%S, CS%uhtr, CS%vhtr, &
+    call MOM_data_client_init(CS%data_client_CS, G, GV, CS%diag, CS%Time, US, CS%h, CS%tv%T, CS%tv%S, CS%uhtr, CS%vhtr, &
                               CS%ave_ssh_ibc)
   endif
 
