@@ -258,6 +258,7 @@ type, public :: diag_ctrl
   type(time_type) :: time_end   !< The end time of the valid
                                 !! interval for any offered field.
   logical :: ave_enabled = .false. !< True if averaging is enabled.
+  logical :: global_ave_enabled = .true. !< True if averaging is allowed globally
 
   !>@{ The following are 3D and 2D axis groups defined for output.  The names
   !! indicate the horizontal (B, T, Cu, or Cv) and vertical (L, i, or 1) locations.
@@ -1219,7 +1220,7 @@ subroutine post_data_0d(diag_field_id, field, diag_cs, is_static)
       call chksum0(field, diag%debug_str, logunit=diag_cs%chksum_iounit)
     else if (is_stat) then
       used = send_data(diag%fms_diag_id, field)
-    elseif (diag_cs%ave_enabled) then
+    elseif (diag_cs%ave_enabled .and. diag_cs%global_ave_enabled) then
       used = send_data(diag%fms_diag_id, field, diag_cs%time_end)
     endif
     diag => diag%next
@@ -1271,7 +1272,7 @@ subroutine post_data_1d_k(diag_field_id, field, diag_cs, is_static)
       call zchksum(locfield, diag%debug_str, logunit=diag_cs%chksum_iounit)
     else if (is_stat) then
       used = send_data(diag%fms_diag_id, locfield)
-    elseif (diag_cs%ave_enabled) then
+    elseif (diag_cs%ave_enabled .and. diag_cs%global_ave_enabled) then
       used = send_data(diag%fms_diag_id, locfield, diag_cs%time_end, weight=diag_cs%time_int)
     endif
     if ((diag%conversion_factor /= 0.) .and. (diag%conversion_factor /= 1.)) deallocate( locfield )
@@ -1435,7 +1436,7 @@ subroutine post_data_2d_low(diag, field, diag_cs, is_static, mask)
         used = send_data(diag%fms_diag_id, locfield, &
                          is_in=isv, js_in=jsv, ie_in=iev, je_in=jev)
       endif
-    elseif (diag_cs%ave_enabled) then
+    elseif (diag_cs%ave_enabled .and. diag_cs%global_ave_enabled) then
       if (associated(locmask)) then
         call assert(size(locfield) == size(locmask), &
             'post_data_2d_low: mask size mismatch: '//diag%debug_str)
@@ -1721,7 +1722,7 @@ subroutine post_data_3d_low(diag, field, diag_cs, is_static, mask)
           used = send_data(diag%fms_diag_id, locfield, &
                            is_in=isv, js_in=jsv, ie_in=iev, je_in=jev)
         endif
-      elseif (diag_cs%ave_enabled) then
+      elseif (diag_cs%ave_enabled .and. diag_cs%global_ave_enabled) then
         if (associated(locmask)) then
           call assert(size(locfield) == size(locmask), &
               'post_data_3d_low: mask size mismatch: '//diag%debug_str)
@@ -1757,7 +1758,7 @@ subroutine post_xy_average(diag_cs, diag, field)
   logical :: staggered_in_x, staggered_in_y, used
   integer :: nz, remap_nz, coord
 
-  if (.not. diag_cs%ave_enabled) then
+  if (.not. (diag_cs%ave_enabled .and. diag_cs%global_ave_enabled)) then
     return
   endif
 
@@ -1854,7 +1855,7 @@ function query_averaging_enabled(diag_cs, time_int, time_end)
 
   if (present(time_int)) time_int = diag_cs%time_int
   if (present(time_end)) time_end = diag_cs%time_end
-  query_averaging_enabled = diag_cs%ave_enabled
+  query_averaging_enabled = diag_cs%ave_enabled & diag_cs%global_ave_enabled
 end function query_averaging_enabled
 
 !> This function returns the valid end time for use with diagnostics that are
