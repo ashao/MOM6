@@ -11,6 +11,7 @@ use MOM_checksum_packages,    only : MOM_accel_chksum, MOM_surface_chksum
 use MOM_cpu_clock,            only : cpu_clock_id, cpu_clock_begin, cpu_clock_end
 use MOM_cpu_clock,            only : CLOCK_COMPONENT, CLOCK_SUBCOMPONENT
 use MOM_cpu_clock,            only : CLOCK_MODULE_DRIVER, CLOCK_MODULE, CLOCK_ROUTINE
+use da_const_inc,             only : da_const_inc_type, apply_increment, send_prior_recv_increment
 use MOM_diag_mediator,        only : diag_mediator_init, enable_averaging, enable_averages
 use MOM_diag_mediator,        only : diag_mediator_infrastructure_init
 use MOM_diag_mediator,        only : diag_set_state_ptrs, diag_update_remap_grids
@@ -359,7 +360,15 @@ type, public :: MOM_control_struct ; private
                                 !! ensemble model state vectors and data assimilation
                                 !! increments and priors
 
-  type(data_client_type), pointer :: data_client_CS !< Pointer to data client control structure  
+  type(da_const_inc_type), pointer :: da_cin_cs !< Control structure for constant increment DA
+  logical :: da_const_inc       !< If .true.,  Do the DA via the CIN method
+  logical :: is_prior = .true.  !< Determine whether this is a prior step or not
+  real :: dt_da                 !< Timestep between dat assimilation stages
+  real :: da_accum              !< Keep track of how long it's been since the last stage
+  real :: dt_inc                !< How long to apply the increments during the posterior
+  real :: inc_accum             !< How long it's been since we started to apply the increment 
+
+  type(data_client_type), pointer :: data_client_CS !< Pointer to data client control structure
   logical                :: streamdata !< If true, call routines that stream data into/out of the model
 end type MOM_control_struct
 
@@ -400,7 +409,7 @@ contains
 !! occur inside of diabatic.
 subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
                     Waves, do_dynamics, do_thermodynamics, start_cycle, &
-                    end_cycle, cycle_length, reset_therm)
+                    end_cycle, cycle_length, reset_therm, save_state, restore_state)
   type(mech_forcing), intent(inout) :: forces        !< A structure with the driving mechanical forces
   type(forcing),      intent(inout) :: fluxes        !< A structure with pointers to themodynamic,
                                                      !! tracer and mass exchange forcing fields
@@ -422,9 +431,14 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
                                                      !! time-stepping cycle; missing is like true.
   real,     optional, intent(in)    :: cycle_length  !< The amount of time in a coupled time
                                                      !! stepping cycle [s].
-  logical,  optional, intent(in)    :: reset_therm   !< This indicates whether the running sums of
+  logical,  optional, intent(in)    :: reset_therm   !< this indicates whether the running sums of
                                                      !! thermodynamic quantities should be reset.
-                                                     !! If missing, this is like start_cycle.
+                                                     !! if missing, this is like start_cycle.
+  logical,  optional, intent(inout) :: save_state    !< this indicates whether the model state should
+                                                     !! should saved
+  logical,  optional, intent(inout) :: restore_state !< this indicates whether the model state should
+                                                     !! should be reset to integrate the prior or
+                                                     !! posterior step
 
   ! local variables
   type(ocean_grid_type),   pointer :: G => NULL()  ! pointer to a structure containing
@@ -621,7 +635,6 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
     Time_local = Time_start + real_to_time(US%T_to_s*rel_time)
 
     if (showCallTree) call callTree_enter("DT cycles (step_MOM) n=",n)
-
     !===========================================================================
     ! This is the first place where the diabatic processes and remapping could occur.
     if (CS%diabatic_first .and. (CS%t_dyn_rel_adv==0.0) .and. do_thermo) then ! do thermodynamics.
@@ -834,6 +847,28 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
     call set_prior_tracer(CS%Time, G, GV, CS%h, CS%tv, CS%odaCS)
     ! call DA interface
     call oda(CS%Time,CS%odaCS)
+  endif
+
+  if (CS%da_const_inc) then
+    CS%da_accum = MOD(CS%da_accum + rel_time, CS%dt_da)
+    if (CS%da_accum == 0.) then
+      ! If at 0., then we switch from a prior to posterior integration
+      CS%is_prior = .not. CS%is_prior
+      ! At the start of the next step what whould we do
+      if (CS%is_prior) then
+        restore_state = .false.
+        save_state = .true.
+        CS%diag%global_ave_enabled = .false.
+      else ! Posterior step
+        CS%inc_accum = 0.
+        restore_state = .true.
+        save_state = .false.
+        CS%diag%global_ave_enabled = .true.
+      endif
+    else
+      restore_state = .false.
+      save_state = .false.
+    endif
   endif
 
   if (showCallTree) call callTree_waypoint("calling extract_surface_state (step_MOM)")
@@ -1184,7 +1219,9 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
 
   call cpu_clock_begin(id_clock_thermo)
 
-  if (CS%dt_da > 0.) call apply_increment(CS%da_const_inc, G, dtdia, h, tv%T, tv%S)
+  if (CS%da_const_inc) then
+    if (CS%is_prior) call apply_increment(CS%da_cin_cs, G, GV, US, dtdia, h, tv%T, tv%S)
+  endif
 
   if (.not.CS%adiabatic) then
     if (CS%debug) then
@@ -1262,7 +1299,6 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
 
     !### Consider moving this up into the if ALE block.
     call postALE_tracer_diagnostics(CS%tracer_Reg, G, GV, CS%diag, dtdia)
-    call send_prior_recv_increment(CS, G, GV, dtdia, h, tv%T, tv%S)
 
     if (CS%debug) then
       call uvchksum("Post-diabatic u", u, v, G%HI, haloshift=2, scale=US%L_T_to_m_s)
@@ -1759,8 +1795,6 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
                  "can be an integer multiple of the coupling timestep.  By "//&
                  "default DT_THERM is set to DT.", &
                  units="s", scale=US%s_to_T, default=US%T_to_s*CS%dt)
-  call get_param(param, "MOM", "DT_DA", CS%dt_da, &
-                 "Length of time (s) between DA updates", default=-1)
   call get_param(param_file, "MOM", "THERMO_SPANS_COUPLING", CS%thermo_spans_coupling, &
                  "If true, the MOM will take thermodynamic and tracer "//&
                  "timesteps that can be longer than the coupling timestep. "//&
@@ -1946,6 +1980,15 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call get_param(param_file, "MOM", "STREAMDATA", CS%streamdata, &
                 "If true, data is streamed out of the model at the end of every forcing dataset.", &
                 default = .false.)
+  call get_param(param_file, "MOM", "DA_CONST_INC", CS%da_const_inc, &
+                "If true, do data assimilation with constant increment, nudging.", &
+                default = .false.)
+  if (CS%da_const_inc) then
+    allocate(CS%da_cin_cs)
+    call da_const_inc_init(CS%da_cin_cs, G, GV, US, param_file, CS%h, CS%tv%T, CS%tv%S, CS%tv%eqn_of_state)
+    call get_param(param_file, "MOM", "DT_DA", CS%dt_da, &
+                   "Length of time (s) between DA updates", default=21600.)
+  endif
 
   ! Set up the model domain and grids.
 #ifdef SYMMETRIC_MEMORY_
@@ -2446,7 +2489,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call cpu_clock_end(id_clock_pass_init)
 
   call register_obsolete_diagnostics(param_file, CS%diag)
-  
+
   if (CS%streamdata) then
     call MOM_data_client_init(CS%data_client_CS, G, GV, CS%diag, CS%Time, US, CS%h, CS%tv%T, CS%tv%S, CS%uhtr, CS%vhtr, &
                               CS%ave_ssh_ibc)
@@ -2482,7 +2525,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   CS%write_IC = save_IC .and. &
                 .not.((dirs%input_filename(1:1) == 'r') .and. &
                       (LEN_TRIM(dirs%input_filename) == 1))
-
+  call save_state_in_memory(restart_CSp)
+  CS%is_prior = .true.
   if (CS%ensemble_ocean) then
     call init_oda(Time, G, GV, CS%odaCS)
   endif

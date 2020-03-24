@@ -1855,7 +1855,7 @@ function query_averaging_enabled(diag_cs, time_int, time_end)
 
   if (present(time_int)) time_int = diag_cs%time_int
   if (present(time_end)) time_end = diag_cs%time_end
-  query_averaging_enabled = diag_cs%ave_enabled & diag_cs%global_ave_enabled
+  query_averaging_enabled = diag_cs%ave_enabled .and. diag_cs%global_ave_enabled
 end function query_averaging_enabled
 
 !> This function returns the valid end time for use with diagnostics that are
