@@ -864,6 +864,7 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
         restore_state = .true.
         save_state = .false.
         CS%diag%global_ave_enabled = .true.
+        call send_prior_recv_inc(CS%da_cin_cs, CS%Time, G, GV, h, T, S)
       endif
     else
       restore_state = .false.
@@ -1985,7 +1986,6 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
                 default = .false.)
   if (CS%da_const_inc) then
     allocate(CS%da_cin_cs)
-    call da_const_inc_init(CS%da_cin_cs, G, GV, US, param_file, CS%h, CS%tv%T, CS%tv%S, CS%tv%eqn_of_state)
     call get_param(param_file, "MOM", "DT_DA", CS%dt_da, &
                    "Length of time (s) between DA updates", default=21600.)
   endif
@@ -2493,6 +2493,9 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   if (CS%streamdata) then
     call MOM_data_client_init(CS%data_client_CS, G, GV, CS%diag, CS%Time, US, CS%h, CS%tv%T, CS%tv%S, CS%uhtr, CS%vhtr, &
                               CS%ave_ssh_ibc)
+  endif
+  if (CS%da_const_inc) then
+    call da_const_inc_init(CS%da_cin_cs, G, GV, US, Time_init, param_file, CS%h, CS%tv%T, CS%tv%S, CS%tv%eqn_of_state)
   endif
 
   if (use_frazil) then
