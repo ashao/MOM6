@@ -183,11 +183,12 @@ end subroutine diag_remap_set_active
 
 !> Configure the vertical axes for a diagnostic remapping control structure.
 !! Reads a configuration parameters to determine coordinate generation.
-subroutine diag_remap_configure_axes(remap_cs, GV, US, param_file)
-  type(diag_remap_ctrl),   intent(inout) :: remap_cs !< Diag remap control structure
-  type(verticalGrid_type), intent(in)    :: GV !< ocean vertical grid structure
-  type(unit_scale_type),   intent(in)    :: US !< A dimensional unit scaling type
-  type(param_file_type),   intent(in)    :: param_file !< Parameter file structure
+subroutine diag_remap_configure_axes(remap_cs, GV, US, param_file, coord_prefix_alt)
+  type(diag_remap_ctrl),     intent(inout) :: remap_cs !< Diag remap control structure
+  type(verticalGrid_type),   intent(in)    :: GV !< ocean vertical grid structure
+  type(unit_scale_type),     intent(in)    :: US !< A dimensional unit scaling type
+  type(param_file_type),     intent(in)    :: param_file !< Parameter file structure
+  character(len=*), optional, intent(in)    :: coord_prefix_alt !< Alternate prefix name 
   ! Local variables
   integer :: nzi(4), nzl(4), k
   character(len=200) :: inputdir, string, filename, int_varname, layer_varname
@@ -196,12 +197,17 @@ subroutine diag_remap_configure_axes(remap_cs, GV, US, param_file)
   character(len=34)  :: longname, string2
 
   character(len=256) :: err_msg
+  character(len=256) :: coord_prefix
+
   logical :: ierr
 
   real, allocatable, dimension(:) :: interfaces, layers
 
+  coord_prefix = "DIAG_COORD"
+  if (present(coord_prefix_alt)) coord_prefix = coord_prefix_alt
+
   call initialize_regridding(remap_cs%regrid_cs, GV, US, GV%max_depth, param_file, mod, &
-           trim(remap_cs%vertical_coord_name), "DIAG_COORD", trim(remap_cs%diag_coord_name))
+           trim(remap_cs%vertical_coord_name), coord_prefix, trim(remap_cs%diag_coord_name))
   call set_regrid_params(remap_cs%regrid_cs, min_thickness=0., integrate_downward_for_e=.false.)
 
   remap_cs%nz = get_regrid_size(remap_cs%regrid_cs)
@@ -339,8 +345,8 @@ subroutine diag_remap_update(remap_cs, G, GV, US, h, T, S, eqn_of_state)
       call MOM_error(FATAL,"diag_remap_update: HYCOM1 coordinate not coded for diagnostics yet!")
     endif
     remap_cs%h(i,j,:) = zInterfaces(1:nz) - zInterfaces(2:nz+1)
-  enddo ; enddo
 
+  enddo; enddo
 end subroutine diag_remap_update
 
 !> Remap diagnostic field to alternative vertical grid.

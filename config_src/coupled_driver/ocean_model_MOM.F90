@@ -155,6 +155,8 @@ type, public :: ocean_state_type ; private
   integer :: saved_nstep_thermo = 0 !< The number of calls to update_ocean that update the thermodynamics.
   logical :: use_ice_shelf    !< If true, the ice shelf model is enabled.
   logical :: use_waves        !< If true use wave coupling.
+  logical :: save_state       !< If true, save state at beginning of next timestep
+  logical :: restore_state    !< If true, restore state at beginning of next timestep
 
   logical :: icebergs_alter_ocean !< If true, the icebergs can change ocean the
                               !! ocean dynamics and forcing fluxes.
@@ -405,6 +407,10 @@ subroutine ocean_model_init(Ocean_sfc, OS, Time_init, Time_in, gas_fields_ocn)
   call close_param_file(param_file)
   call diag_mediator_close_registration(OS%diag)
 
+  OS%save_state = .true.
+  OS%restore_state = .false.
+  call save_state_in_memory(OS%restart_CSp)
+
   call MOM_mesg('==== Completed MOM6 Coupled Initialization ====', 2)
 
   call callTree_leave("ocean_model_init(")
@@ -486,16 +492,35 @@ subroutine update_ocean_model(Ice_ocean_boundary, OS, Ocean_sfc, time_start_upda
                     "called first to allocate this structure.")
     return
   endif
-
+  
   do_dyn = .true. ; if (present(update_dyn)) do_dyn = update_dyn
   do_thermo = .true. ; if (present(update_thermo)) do_thermo = update_thermo
+  
+  if (OS%save_state) then
+    OS%saved_Time = OS%Time
+    if (do_dyn)    OS%saved_Time_dyn     = OS%Time_dyn
+    if (do_dyn)    OS%saved_nstep        = OS%nstep       
+    if (do_thermo) OS%saved_nstep_thermo = OS%nstep_thermo
+    call save_state_in_memory(OS%restart_CSp)
+    OS%save_state = .false.
+  endif
+  if (OS%restore_state) then
+    OS%Time = OS%saved_Time
+    if (do_dyn)    OS%Time_dyn     = OS%saved_Time_dyn
+    if (do_dyn)    OS%nstep        = OS%saved_nstep
+    if (do_thermo) OS%nstep_thermo = OS%saved_nstep_thermo
+    call restore_state_from_memory(OS%restart_CSp)
+    OS%restore_state = .false.
+  endif
 
-  if (do_thermo .and. (time_start_update /= OS%Time)) &
+  if (do_thermo .and. (time_start_update /= OS%Time)) then
     call MOM_error(WARNING, "update_ocean_model: internal clock does not "//&
                             "agree with time_start_update argument.")
-  if (do_dyn .and. (time_start_update /= OS%Time_dyn)) &
+  endif
+  if (do_dyn .and. (time_start_update /= OS%Time_dyn)) then
     call MOM_error(WARNING, "update_ocean_model: internal dynamics clock does not "//&
                             "agree with time_start_update argument.")
+  endif
 
   if (.not.(do_dyn .or. do_thermo)) call MOM_error(FATAL, &
       "update_ocean_model called without updating either dynamics or thermodynamics.")
@@ -650,28 +675,13 @@ subroutine update_ocean_model(Ice_ocean_boundary, OS, Ocean_sfc, time_start_upda
       Time1 = Time_seg_start + real_to_time(t_elapsed_seg)
     enddo
   endif
-
+  
   if (do_dyn) OS%Time_dyn = Time_seg_start + Ocean_coupling_time_step
   if (do_dyn) OS%nstep = OS%nstep + 1
   OS%Time = Time_thermo_start  ! Reset the clock to compensate for shared pointers.
   if (do_thermo) OS%Time = OS%Time + Ocean_coupling_time_step
   if (do_thermo) OS%nstep_thermo = OS%nstep_thermo + 1
   
-  if (save_state) then
-    OS%saved_Time = OS%Time
-    if (do_dyn)    OS%saved_Time_dyn     = OS%Time_dyn    
-    if (do_dyn)    OS%saved_nstep        = OS%nstep       
-    if (do_thermo) OS%saved_nstep_thermo = OS%nstep_thermo
-    call save_state_in_memory(OS%restart_CSp)
-  endif
-  if (restore_state) then
-    OS%Time = OS%saved_Time
-    if (do_dyn)    OS%Time_dyn     = OS%saved_Time_dyn    
-    if (do_dyn)    OS%nstep        = OS%saved_nstep       
-    if (do_thermo) OS%nstep_thermo = OS%saved_nstep_thermo
-    call restore_state_from_memory(OS%restart_CSp)
-  endif
-
   if (do_dyn) then
     call mech_forcing_diags(OS%forces, dt_coupling, OS%grid, OS%Time_dyn, OS%diag, OS%forcing_CSp%handles)
   endif
@@ -686,7 +696,10 @@ subroutine update_ocean_model(Ice_ocean_boundary, OS, Ocean_sfc, time_start_upda
   call convert_state_to_ocean_type(OS%sfc_state, Ocean_sfc, OS%grid, OS%US)
   Time1 = OS%Time ; if (do_dyn) Time1 = OS%Time_dyn
   call coupler_type_send_data(Ocean_sfc%fields, Time1)
-
+  
+  OS%save_state = save_state
+  OS%restore_state = restore_state
+  
   call callTree_leave("update_ocean_model()")
 end subroutine update_ocean_model
 

@@ -1,6 +1,7 @@
 !> Contains the routines necessary to stream data into and out of the model to
 !! a compatible orchestrator
 module MOM_data_client
+  use MOM_domains,        only : pass_var
   use MOM_diag_mediator,        only : diag_ctrl, register_diag_field, post_data
   use MOM_error_handler,        only : MOM_error, FATAL
   use MOM_time_manager,         only : time_type, time_type_to_real
@@ -141,8 +142,8 @@ module MOM_data_client
 
     ! Open file to be used for writing timing
     write(fname,("(A,I6.6)")) "ssc-timing_",PE_here()
-    open(newunit=CS%timing_unit, file=trim(fname), status='REPLACE')
-    write(CS%timing_unit,*) "MODEL_TIMESTAMP TOTAL_TIME_ELAPSED TIME_ELAPSED NUMBER_OF_ELEMENTS_SENT"
+ !   open(newunit=CS%timing_unit, file=trim(fname), status='REPLACE')
+ !   write(CS%timing_unit,*) "MODEL_TIMESTAMP TOTAL_TIME_ELAPSED TIME_ELAPSED NUMBER_OF_ELEMENTS_SENT"
   end subroutine MOM_data_client_init
 
   subroutine streamout_data(CS, Time, G, GV, dt, h)
@@ -172,6 +173,7 @@ module MOM_data_client
       CS%num_elements = 0
       CS%timing_current = 0.
 
+      call pass_var(h,G%Domain)
       ! Check to see whether we should actually send data
       if (CS%id_streamout_h > 0)   call put_array(CS%ssc_data_client, trim(key_prefix)//"h"  , h)
       if (CS%id_streamout_T > 0)   call put_array(CS%ssc_data_client, trim(key_prefix)//"T"  , CS%T)
@@ -181,7 +183,7 @@ module MOM_data_client
       if (CS%id_streamout_ssh > 0) call put_array(CS%ssc_data_client, trim(key_prefix)//"ssh", CS%ssh)
       CS%accumulated_time = 0
       CS%timing_total = CS%timing_total + CS%timing_current
-      write(CS%timing_unit,*) NINT(time_real/86400.), CS%timing_total, CS%timing_current, CS%num_elements
+  !    write(CS%timing_unit,*) NINT(time_real/86400.), CS%timing_total, CS%timing_current, CS%num_elements
     endif
     CS%accumulated_time = CS%accumulated_time + dt*2
 

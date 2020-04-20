@@ -134,6 +134,8 @@ use MOM_ALE,                   only : ale_offline_tracer_final, ALE_main_offline
 ! Data streaming modules
 use MOM_data_client,           only : data_client_type, MOM_data_client_init, streamout_data
 
+use da_const_inc,              only : da_const_inc_init, send_prior_recv_increment
+use MOM_restart,                only : save_state_in_memory
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -362,7 +364,7 @@ type, public :: MOM_control_struct ; private
 
   type(da_const_inc_type), pointer :: da_cin_cs !< Control structure for constant increment DA
   logical :: da_const_inc       !< If .true.,  Do the DA via the CIN method
-  logical :: is_prior = .true.  !< Determine whether this is a prior step or not
+  logical :: is_prior = .false.  !< Determine whether this is a prior step or not
   real :: dt_da                 !< Timestep between dat assimilation stages
   real :: da_accum              !< Keep track of how long it's been since the last stage
   real :: dt_inc                !< How long to apply the increments during the posterior
@@ -856,21 +858,25 @@ subroutine step_MOM(forces, fluxes, sfc_state, Time_start, time_int_in, CS, &
       CS%is_prior = .not. CS%is_prior
       ! At the start of the next step what whould we do
       if (CS%is_prior) then
+        call MOM_mesg("Beginning the prior integration")
         restore_state = .false.
         save_state = .true.
         CS%diag%global_ave_enabled = .false.
       else ! Posterior step
+        call MOM_mesg("Beginning the posterior integration")
         CS%inc_accum = 0.
         restore_state = .true.
         save_state = .false.
         CS%diag%global_ave_enabled = .true.
-        call send_prior_recv_inc(CS%da_cin_cs, CS%Time, G, GV, h, T, S)
+        call send_prior_recv_increment(CS%da_cin_cs, Time_local, G, GV, US, h, CS%T, CS%S)
       endif
     else
       restore_state = .false.
       save_state = .false.
     endif
   endif
+
+  if (CS%streamdata) call streamout_data(CS%data_client_CS, Time_local, G, GV, dtdia, CS%h)
 
   if (showCallTree) call callTree_waypoint("calling extract_surface_state (step_MOM)")
   call extract_surface_state(CS, sfc_state)
@@ -1221,7 +1227,10 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
   call cpu_clock_begin(id_clock_thermo)
 
   if (CS%da_const_inc) then
-    if (CS%is_prior) call apply_increment(CS%da_cin_cs, G, GV, US, dtdia, h, tv%T, tv%S)
+    if (CS%is_prior) then
+      CS%inc_accum = mod(CS%inc_accum + dtdia,CS%dt_da)
+      if (CS%inc_accum < CS%dt_inc) call apply_increment(CS%da_cin_cs, G, GV, US, dtdia, h, tv%T, tv%S)
+    endif
   endif
 
   if (.not.CS%adiabatic) then
