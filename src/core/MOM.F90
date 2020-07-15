@@ -142,6 +142,8 @@ use MOM_offline_main,          only : offline_fw_fluxes_into_ocean, offline_fw_f
 use MOM_offline_main,          only : offline_advection_layer, offline_transport_end
 use MOM_ALE,                   only : ale_offline_tracer_final, ALE_main_offline
 
+! SmartSim Client
+use MOM_smartsim_connector,    only : smartsim_type, initialize_smartsim_connector, send_variables_to_database
 implicit none ; private
 
 #include <MOM_memory.h>
@@ -371,7 +373,7 @@ type, public :: MOM_control_struct ; private
     !< Pointer to the MOM diagnostics control structure
   type(offline_transport_CS),    pointer :: offline_CSp => NULL()
     !< Pointer to the offline tracer transport control structure
-
+  type(smartsim_type),           pointer :: smartsim_CS => NULL()
   logical               :: ensemble_ocean !< if true, this run is part of a
                                 !! larger ensemble for the purpose of data assimilation
                                 !! or statistical analysis.
@@ -839,6 +841,7 @@ subroutine step_MOM(forces_in, fluxes_in, sfc_state, Time_start, time_int_in, CS
                           CS%CDp, p_surf, CS%t_dyn_rel_diag, CS%diag_pre_sync,&
                           G, GV, US, CS%diagnostics_CSp)
       call post_tracer_diagnostics(CS%Tracer_reg, h, CS%diag_pre_sync, CS%diag, G, GV, CS%t_dyn_rel_diag)
+      call send_variables_to_database(CS%smartsim_CS, G, Time_local, CS%t_dyn_rel_diag, h)
       call diag_copy_diag_to_storage(CS%diag_pre_sync, h, CS%diag)
       if (showCallTree) call callTree_waypoint("finished calculate_diagnostic_fields (step_MOM)")
       call disable_averaging(CS%diag)
@@ -2623,6 +2626,8 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   if (CS%use_ALE_algorithm) then
     call ALE_register_diags(Time, G, GV, US, diag, CS%ALE_CSp)
   endif
+
+  call initialize_smartsim_connector(CS%smartsim_CS, G)
 
   ! This subroutine initializes any tracer packages.
   new_sim = is_new_run(restart_CSp)
