@@ -114,6 +114,12 @@ type :: diag_remap_ctrl
   real, dimension(:,:,:), allocatable :: h !< Remap grid thicknesses [H ~> m or kg m-2]
   real, dimension(:,:,:), allocatable :: h_extensive !< Remap grid thicknesses for extensive
                                            !! variables [H ~> m or kg m-2]
+  real, dimension(:,:,:), allocatable :: umo !< Remapped zonal mass transport [R Z L2 T-1 ~> kg s-1]
+  real, dimension(:,:,:), allocatable :: vmo !< Remapped meridional mass transport [R Z L2 T-1 ~> kg s-1]
+  real, dimension(:,:,:), allocatable :: wmo !< Vertical mass transport from umo and vmo [R Z L2 T-1 ~> kg s-1]
+  logical :: remap_umo=.false. !< If true, umo should be remapped and stored
+  logical :: remap_vmo=.false. !< If true, vmo should be remapped and stored
+  logical :: remap_wmo=.false. !< If true, wmo should be remapped and stored
   integer :: interface_axes_id = 0 !< Vertical axes id for remapping at interfaces
   integer :: layer_axes_id = 0 !< Vertical axes id for remapping on layers
   logical :: answers_2018      !< If true, use the order of arithmetic and expressions for remapping
@@ -150,6 +156,10 @@ subroutine diag_remap_end(remap_cs)
   type(diag_remap_ctrl), intent(inout) :: remap_cs !< Diag remapping control structure
 
   if (allocated(remap_cs%h)) deallocate(remap_cs%h)
+  if (allocated(remap_cs%h_extensive)) deallocate(remap_cs%h_extensive)
+  if (allocated(remap_cs%umo)) deallocate(remap_cs%umo)
+  if (allocated(remap_cs%vmo)) deallocate(remap_cs%vmo)
+  if (allocated(remap_cs%wmo)) deallocate(remap_cs%wmo)
   remap_cs%configured = .false.
   remap_cs%initialized = .false.
   remap_cs%used = .false.
@@ -794,5 +804,6 @@ subroutine horizontally_average_diag_field(G, GV, h, staggered_in_x, staggered_i
   enddo
 
 end subroutine horizontally_average_diag_field
+
 
 end module MOM_diag_remap

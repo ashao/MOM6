@@ -316,6 +316,10 @@ type, public :: diag_ctrl
   real, dimension(:,:,:), pointer :: h => null() !< The thicknesses needed for remapping [H ~> m or kg m-2]
   real, dimension(:,:,:), pointer :: T => null() !< The temperatures needed for remapping [degC]
   real, dimension(:,:,:), pointer :: S => null() !< The salinities needed for remapping [ppt]
+
+  real, dimension(:,:,:), allocatable :: wmo !< Vertical transport diagnostic
+  logical :: needs_wmo = .false.
+
   type(EOS_type),  pointer :: eqn_of_state => null() !< The equation of state type
   type(ocean_grid_type), pointer :: G => null()  !< The ocean grid type
   type(verticalGrid_type), pointer :: GV => null()  !< The model's vertical ocean grid
@@ -1516,9 +1520,130 @@ subroutine post_data_2d_low(diag, field, diag_cs, is_static, mask)
     deallocate( locfield )
 end subroutine post_data_2d_low
 
+!> Calculate and post a vertical transport-like diagnostic by integrating the convergence of mass transports,
+!! integrating from the bottom up. Note this needs to be done after the umo and vmo have been remapped
+subroutine post_vertical_transport_diag( G, GV, diag_field_id, uh_native, vh_native, diag_cs )
+  type(ocean_grid_type),                     intent(in) :: G   !< ocean grid structure
+  type(verticalGrid_type),                   intent(in) :: GV  !< ocean vertical grid structure
+  integer,                                   intent(in) :: diag_field_id !< The id for an output variable returned by a
+                                                                         !! previous call to register_diag_field.
+  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)), intent(in) :: uh_native !< Accumulated zonal thickness fluxes
+                                                                     !! used to advect tracers [H L2 ~> m3 or kg]
+  real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(in) :: vh_native !< Accumulated meridional thickness fluxes
+                                                                     !! used to advect tracers [H L2 ~> m3 or kg]
+  type(diag_ctrl), target,                   intent(in) :: diag_CS !< Structure used to regulate diagnostic output
+  real, dimension(:,:,:) :: wmo, uh, vh
+  type(diag_type) :: diag
+  type(diag_remap_ctrl), pointer :: diag_remap_cs
+
+  integer :: i, j, k, is, ie, js, je, nz
+  is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec
+  ! Check to see if the wmo is needed on the native grid
+  if (diag_cs%needs_wmo) then
+    nz = G%ke+1
+    do j=js,je; do i=is;ie
+      diag_cs%wmo(i,j,nz) = 0.
+    enddo; enddo
+    do k=nz-1,1,-1; do j=js,je; do i=is,ie
+      diag_cs%wmo(i,j,k) = diag_cs%wmo(i,j,k+1) + ((uh_native(I,j,k) - uh_native(I-1,j,k)) &
+                                                +  (vh_native(i,J,k) - vh_native(i,J-1,k)))
+    enddo; enddo; enddo
+  endif
+
+  ! Sweep through all diagnostic coordinates and check to see if we need to calculate wmo. This catches the case
+  ! where another diagnostic depends on wmo, but wmo is not requested
+  do i=1,diag_cs%num_diag_coords
+    diag_remap_cs = diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+    if (diag_remap_cs%remap_wmo) then
+      nz = diag%axes%nz+1
+      uh => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%umo
+      vh => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%vmo
+      wmo => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%wmo
+      do j=js,je; do i=is;ie
+        wmo(i,j,nz) = 0.
+      enddo; enddo
+      do k=nz-1,1,-1; do j=js,je; do i=is,ie
+        wmo(i,j,k) = wmo(i,j,k+1) + ((uh(I,j,k) - uh(I-1,j,k)) + (vh(i,J,k) - vh(i,J-1,k)))
+      enddo; enddo; enddo
+    endif
+  enddo
+
+  ! Loop through and post all the requested diagnostics
+  if (diag_field_id > 0) then
+    diag => diag_cs%diags(diag_field_id)
+    do while (associated(diag))
+      wmo => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%wmo
+      if (associated(diag%axes%mask3d)) then
+        call post_data_3d_low(diag, wmo, diag_cs, .false., mask=diag%axes%mask3d)
+      else
+        call post_data_3d_low(diag, wmo, diag_cs, .false.)
+      endif
+      diag => diag%next
+    enddo
+  endif
+
+end subroutine post_vertical_transport_diag
+
+!> Post a horizontal transport-like diagnostic including remapping as necessary.
+subroutine post_horizontal_transport_diag(diag_field_id, transport, diag_cs, grid_type )
+  integer,                 intent(in) :: diag_field_id !< The id for an output variable returned by a
+                                                       !! previous call to register_diag_field.
+  real, dimension(:,:,:),  intent(in) :: transport !< A horizontal mass transport
+  type(diag_ctrl), target, intent(in) :: diag_CS   !< Structure used to regulate diagnostic output
+  character,               intent(in) :: grid_type !< Either 'U' or 'V' (case-insensitive) depending on whether
+                                                   !! the transport is on the U or V grid
+  logical :: staggered_in_x, do_remap
+  real, dimension(:,:,:), pointer :: remapped_array, diag_array
+
+
+  select case(lowercase(grid_type))
+    case ('u')
+      staggered_in_x = .true.
+    case ('v')
+      staggered_in_x = .false.
+    case default
+      call MOM_error(FATAL, "post_horizontal_transport_diag: Unsupported grid type specified "//grid_type)
+  end select
+
+  ! Sweep through all diagnostic coordinates and check to see if we need to remap and store the transport.
+  do i=1,diag_cs%num_diag_coords
+    diag_remap_cs = diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+    if (staggered_in_x) then
+      remapped_array => diag_remap_cs%umo
+      do_remap = diag_remap_cs%needs_umo
+    else
+      remapped_array => diag_remap_cs%vmo
+      do_remap = diag_remap_cs%needs_vmo
+    endif
+    if (do_remap) call vertically_reintegrate_diag_field(diag_remap_cs, diag_cs%G, diag_cs%h_begin, &
+                         diag_remap_cs%h_extensive, staggered_in_x, .not. staggered_in_x,           &
+                         diag%axes%mask3d, transport, remapped_array)
+  enddo
+
+  ! Loop through and post all the requested diagnostics
+  if (diag_field_id > 0) then
+    diag => diag_cs%diags(diag_field_id)
+    do while (associated(diag))
+      ! Assign the correct array to point to
+      if (diag%axes%is_native) then
+        diag_array => transport
+      else
+        diag_remap_cs = diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+        if (staggered_in_x) then
+          diag_array => diag_remap_cs%umo
+        else
+          diag_array => diag_remap_cs%vmo
+        endif
+      endif
+      call post_data_3d_low(diag, diag_array, diag_cs, .false.)
+      diag => diag%next
+    enddo
+  endif
+
+end subroutine post_horizontal_transport_diag
+
 !> Make a real 3-d array diagnostic available for averaging or output.
 subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
-
   integer,           intent(in) :: diag_field_id !< The id for an output variable returned by a
                                                  !! previous call to register_diag_field.
   real,              intent(in) :: field(:,:,:)  !< 3-d array being offered for output or averaging
@@ -1531,6 +1656,10 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
 
   ! Local variables
   type(diag_type), pointer :: diag => null()
+  type(diag_remap_ctrl), pointer :: diag_remap_cs => null()
+
+  logical :: store_umo_here, store_vmo_here, store_wmo_here
+
   integer :: nz, i, j, k
   real, dimension(:,:,:), allocatable :: remapped_field
   logical :: staggered_in_x, staggered_in_y
@@ -1557,6 +1686,19 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
     staggered_in_x = diag%axes%is_u_point .or. diag%axes%is_q_point
     staggered_in_y = diag%axes%is_v_point .or. diag%axes%is_q_point
 
+    ! Initialize/allocate variables needed for remapped diagnostics
+    if (.not. diag%axes%is_native) then
+      if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
+      diag_remap_cs => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+      if ( diag%axes%needs_interpolating ) then
+        nz = diag%axes%nz + 1
+      else
+        nz = diag%axes%nz
+      endif
+      allocate(remapped_field(size(field,1), size(field,2), nz))
+      if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
+    endif
+
     if (diag%v_extensive .and. .not.diag%axes%is_native) then
       ! The field is vertically integrated and needs to be re-gridded
       if (present(mask)) then
@@ -1564,9 +1706,8 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       endif
 
       if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      allocate(remapped_field(size(field,1), size(field,2), diag%axes%nz))
       call vertically_reintegrate_diag_field(                                    &
-        diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number), diag_cs%G,  &
+        diag_remap_cs, diag_cs%G,  &
         diag_cs%h_begin,                                                         &
         diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%h_extensive, &
         staggered_in_x, staggered_in_y, diag%axes%mask3d, field, remapped_field)
@@ -1579,9 +1720,6 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       else
         call post_data_3d_low(diag, remapped_field, diag_cs, is_static)
       endif
-      if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      deallocate(remapped_field)
-      if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
     elseif (diag%axes%needs_remapping) then
       ! Remap this field to another vertical coordinate.
       if (present(mask)) then
@@ -1589,8 +1727,7 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       endif
 
       if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      allocate(remapped_field(size(field,1), size(field,2), diag%axes%nz))
-      call diag_remap_do_remap(diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number), &
+      call diag_remap_do_remap(diag_remap_cs, &
               diag_cs%G, diag_cs%GV, h_diag, staggered_in_x, staggered_in_y, &
               diag%axes%mask3d, field, remapped_field)
       if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
@@ -1602,9 +1739,6 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       else
         call post_data_3d_low(diag, remapped_field, diag_cs, is_static)
       endif
-      if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      deallocate(remapped_field)
-      if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
     elseif (diag%axes%needs_interpolating) then
       ! Interpolate this field to another vertical coordinate.
       if (present(mask)) then
@@ -1612,9 +1746,7 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       endif
 
       if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      allocate(remapped_field(size(field,1), size(field,2), diag%axes%nz+1))
-      call vertically_interpolate_diag_field(diag_cs%diag_remap_cs( &
-              diag%axes%vertical_coordinate_number), &
+      call vertically_interpolate_diag_field( diag_remap_cs, &
               diag_cs%G, h_diag, staggered_in_x, staggered_in_y, &
               diag%axes%mask3d, field, remapped_field)
       if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
@@ -1626,13 +1758,17 @@ subroutine post_data_3d(diag_field_id, field, diag_cs, is_static, mask, alt_h)
       else
         call post_data_3d_low(diag, remapped_field, diag_cs, is_static)
       endif
-      if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
-      deallocate(remapped_field)
-      if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
     else
       call post_data_3d_low(diag, field, diag_cs, is_static, mask)
     endif
     diag => diag%next
+
+    ! Reset quantities used for remapped quantities
+    if (.not. diag%axes%is_native) then
+      if (id_clock_diag_remap>0) call cpu_clock_begin(id_clock_diag_remap)
+      deallocate(remapped_field)
+      if (id_clock_diag_remap>0) call cpu_clock_end(id_clock_diag_remap)
+    endif
   enddo
   if (id_clock_diag_mediator>0) call cpu_clock_end(id_clock_diag_mediator)
 
@@ -1939,7 +2075,8 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
             long_name, units, missing_value, range, mask_variant, standard_name,      &
             verbose, do_not_log, err_msg, interp_method, tile_count, cmor_field_name, &
             cmor_long_name, cmor_units, cmor_standard_name, cell_methods, &
-            x_cell_method, y_cell_method, v_cell_method, conversion, v_extensive)
+            x_cell_method, y_cell_method, v_cell_method, conversion, v_extensive, &
+            needs_vmo, needs_umo, needs_wmo)
   character(len=*),           intent(in) :: module_name !< Name of this module, usually "ocean_model"
                                                         !! or "ice_shelf_model"
   character(len=*),           intent(in) :: field_name !< Name of the diagnostic field
@@ -1977,6 +2114,10 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
   real,             optional, intent(in) :: conversion !< A value to multiply data by before writing to file
   logical,          optional, intent(in) :: v_extensive !< True for vertically extensive fields (vertically
                                                          !! integrated). Default/absent for intensive.
+  logical,          optional, intent(in) :: needs_umo !< True if the diagnostic relies on zonal mass transport
+  logical,          optional, intent(in) :: needs_vmo !< True if the diagnostic relies on meridional mass transport
+  logical,          optional, intent(in) :: needs_wmo !< True if the diagnostic relies on vertical mass transport
+
   ! Local variables
   real :: MOM_missing_value
   type(diag_ctrl), pointer :: diag_cs => NULL()
@@ -2043,6 +2184,7 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
     endif
   endif
   var_list = trim(var_list)//"}"
+  if (active) diag_cs%needs_wmo = diag_cs%needs_wmo .or. needs_wmo
 
   ! For each diagnostic coordinate register the diagnostic again under a different module name
   do i=1,diag_cs%num_diag_coords
@@ -2085,6 +2227,13 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
                      conversion=conversion, v_extensive=v_extensive)
           if (active) then
             call diag_remap_set_active(diag_cs%diag_remap_cs(i))
+            if (present(needs_umo)) diag_cs%diag_remap_cs(i)%remap_umo .or. needs_umo
+            if (present(needs_vmo)) diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_vmo
+            if (present(needs_wmo)) then
+              diag_cs%diag_remap_cs(i)%remap_umo .or. needs_wmo
+              diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_wmo
+              diag_cs%diag_remap_cs(i)%remap_wmo .or. needs_wmo
+            endif
           endif
           module_list = trim(module_list)//","//trim(new_module_name)
           num_modnm = num_modnm + 1
@@ -2217,7 +2366,7 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
 
 end function register_diag_field
 
-!> Returns True if either the native or CMOr version of the diagnostic were registered. Updates 'dm_id'
+!> Returns True if either the native or CMOR version of the diagnostic were registered. Updates 'dm_id'
 !! after calling register_diag_field_expand_axes() for both native and CMOR variants of the field.
 logical function register_diag_field_expand_cmor(dm_id, module_name, field_name, axes, init_time, &
             long_name, units, missing_value, range, mask_variant, standard_name,      &
@@ -2305,6 +2454,7 @@ logical function register_diag_field_expand_cmor(dm_id, module_name, field_name,
     call add_xyz_method(this_diag, axes, x_cell_method, y_cell_method, v_cell_method, v_extensive)
     if (present(v_extensive)) this_diag%v_extensive = v_extensive
     if (present(conversion)) this_diag%conversion_factor = conversion
+
     register_diag_field_expand_cmor = .true.
   endif
 
@@ -4310,5 +4460,22 @@ subroutine downsample_mask_3d(field_in, field_out, dl, isc_o, jsc_o, isc_d, iec_
     if (tot_non_zero > 0.0) field_out(i,j,k)=1.0
   enddo ; enddo ; enddo
 end subroutine downsample_mask_3d
+
+!> For diagnostics that rely on remapped transports, allocate memory within each diagnostic coordinate's control
+!! structure to avoid unnecessary recomputations
+subroutine allocate_remapped_transport_arrays(G, diag)
+  type(ocean_grid_type), intent(in)    :: G    !< Ocean grid structure
+  type(diag_ctrl),       intent(inout) :: diag !< Diagnostic coodinate control structure
+
+  integer :: i, nz
+
+  do i=1,diag%num_diag_coords
+    nz = diag%diag_remap_cs(i)%nz
+    if (diag%diag_remap_cs(i)%remap_umo) allocate(diag%diag_remap_cs(i)%umo(G%isdB:G%iedB,G%jsd:G%jed,nz))
+    if (diag%diag_remap_cs(i)%remap_vmo) allocate(diag%diag_remap_cs(i)%vmo(G%isd:G%ied,G%jsdB:G%jedB,nz))
+    if (diag%diag_remap_cs(i)%remap_wmo) allocate(diag%diag_remap_cs(i)%wmo(G%isd:G%ied,G%jsd:G%jed,nz+1))
+  enddo
+
+end subroutine allocate_remapped_transport_arrays
 
 end module MOM_diag_mediator

@@ -12,8 +12,9 @@ use MOM_diag_mediator,     only : register_diag_field, register_scalar_field
 use MOM_diag_mediator,     only : register_static_field, diag_register_area_ids
 use MOM_diag_mediator,     only : diag_ctrl, time_type, safe_alloc_ptr
 use MOM_diag_mediator,     only : diag_get_volume_cell_measure_dm_id
-use MOM_diag_mediator,     only : diag_grid_storage
+use MOM_diag_mediator,     only : diag_grid_storage, diag_type
 use MOM_diag_mediator,     only : diag_save_grids, diag_restore_grids, diag_copy_storage_to_diag
+use MOM_diag_mediator,     only : post_horizontal_transport_diag, post_vertical_transport_diag
 use MOM_domains,           only : create_group_pass, do_group_pass, group_pass_type
 use MOM_domains,           only : To_North, To_East
 use MOM_EOS,               only : calculate_density, calculate_density_derivs, EOS_domain
@@ -1493,13 +1494,14 @@ subroutine post_transport_diagnostics(G, GV, US, uhtr, vhtr, h, IDs, diag_pre_dy
     enddo ; enddo ; enddo
     call post_data(IDs%id_umo_2d, umo2d, diag)
   endif
-  if (IDs%id_umo > 0) then
+  if (IDs%id_umo > 0 .or. IDS%id_wmo > 0) then
     ! Convert to kg/s.
     do k=1,nz ; do j=js,je ; do I=is-1,ie
       umo(I,j,k) = uhtr(I,j,k) * H_to_RZ_dt
     enddo ; enddo ; enddo
-    call post_data(IDs%id_umo, umo, diag, alt_h = diag_pre_dyn%h_state)
+    call post_horizontal_transport_diag(IDS%id_umo, umo, diag, 'U')
   endif
+
   if (IDs%id_vmo_2d > 0) then
     vmo2d(:,:) = 0.0
     do k=1,nz ; do J=js-1,je ; do i=is,ie
@@ -1507,13 +1509,14 @@ subroutine post_transport_diagnostics(G, GV, US, uhtr, vhtr, h, IDs, diag_pre_dy
     enddo ; enddo ; enddo
     call post_data(IDs%id_vmo_2d, vmo2d, diag)
   endif
-  if (IDs%id_vmo > 0) then
+  if (IDs%id_vmo > 0 .or. IDS%id_wmo > 0) then
     ! Convert to kg/s.
     do k=1,nz ; do J=js-1,je ; do i=is,ie
       vmo(i,J,k) = vhtr(i,J,k) * H_to_RZ_dt
     enddo ; enddo ; enddo
-    call post_data(IDs%id_vmo, vmo, diag, alt_h = diag_pre_dyn%h_state)
+    call post_horizontal_transport_diag(IDS%id_vmo, vmo, diag, 'V')
   endif
+  call post_vertical_transport_diag(G, GV, IDS%id_wmo, umo, vmo, diag)
 
   if (IDs%id_uhtr > 0) call post_data(IDs%id_uhtr, uhtr, diag, alt_h = diag_pre_dyn%h_state)
   if (IDs%id_vhtr > 0) call post_data(IDs%id_vhtr, vhtr, diag, alt_h = diag_pre_dyn%h_state)
@@ -2040,11 +2043,11 @@ subroutine register_transport_diags(Time, G, GV, US, IDs, diag)
   IDs%id_umo = register_diag_field('ocean_model', 'umo', &
       diag%axesCuL, Time, 'Ocean Mass X Transport', &
       'kg s-1', conversion=US%RZ_T_to_kg_m2s*US%L_to_m**2, &
-      standard_name='ocean_mass_x_transport', y_cell_method='sum', v_extensive=.true.)
+      standard_name='ocean_mass_x_transport', y_cell_method='sum', v_extensive=.true., needs_umo=.true.)
   IDs%id_vmo = register_diag_field('ocean_model', 'vmo', &
       diag%axesCvL, Time, 'Ocean Mass Y Transport', &
       'kg s-1', conversion=US%RZ_T_to_kg_m2s*US%L_to_m**2, &
-      standard_name='ocean_mass_y_transport', x_cell_method='sum', v_extensive=.true.)
+      standard_name='ocean_mass_y_transport', x_cell_method='sum', v_extensive=.true., needs_vmo=.true.)
   IDs%id_umo_2d = register_diag_field('ocean_model', 'umo_2d', &
       diag%axesCu1, Time, 'Ocean Mass X Transport Vertical Sum', &
       'kg s-1', conversion=US%RZ_T_to_kg_m2s*US%L_to_m**2, &
@@ -2053,6 +2056,11 @@ subroutine register_transport_diags(Time, G, GV, US, IDs, diag)
       diag%axesCv1, Time, 'Ocean Mass Y Transport Vertical Sum', &
       'kg s-1', conversion=US%RZ_T_to_kg_m2s*US%L_to_m**2, &
       standard_name='ocean_mass_y_transport_vertical_sum', x_cell_method='sum')
+  IDs%id_wmo = register_diag_field('ocean_model', 'wmo', &
+      diag%axesCvL, Time, 'Ocean Mass Upward Transport', &
+      'kg s-1', conversion=US%RZ_T_to_kg_m2s*US%L_to_m**2, &
+      standard_name='ocean_mass_z_transport', x_cell_method='sum', v_extensive=.true., &
+      needs_umo=.true., needs_vmo=.true.)
   IDs%id_dynamics_h = register_diag_field('ocean_model','dynamics_h',  &
       diag%axesTl, Time, 'Change in layer thicknesses due to horizontal dynamics', &
       'm s-1', v_extensive=.true., conversion=GV%H_to_m)

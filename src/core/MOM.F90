@@ -2660,6 +2660,11 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   call register_transport_diags(Time, G, GV, US, CS%transport_IDs, CS%diag)
   call register_tracer_diagnostics(CS%tracer_Reg, CS%h, Time, diag, G, GV, US, &
                                    CS%use_ALE_algorithm)
+
+  ! Now that all tracer and transport diagnostics have been registered, arrays for the remapped transports
+  ! can be allocated as needed
+  call allocate_remapped_transport_arrays( G, diag )
+
   if (CS%use_ALE_algorithm) then
     call ALE_register_diags(Time, G, GV, US, diag, CS%ALE_CSp)
   endif
