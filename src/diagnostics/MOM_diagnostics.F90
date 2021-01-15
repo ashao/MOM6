@@ -189,6 +189,7 @@ type, public :: transport_diag_IDs ; private
   !>@{  Diagnostics for tracer horizontal transport
   integer :: id_uhtr = -1, id_umo = -1, id_umo_2d = -1
   integer :: id_vhtr = -1, id_vmo = -1, id_vmo_2d = -1
+  integer :: id_wmo = -1
   integer :: id_dynamics_h = -1, id_dynamics_h_tendency = -1
   !>@}
 end type transport_diag_IDs

@@ -29,6 +29,7 @@ use MOM_diag_remap,       only : diag_remap_configure_axes, diag_remap_axes_conf
 use MOM_diag_remap,       only : diag_remap_get_axes_info, diag_remap_set_active
 use MOM_diag_remap,       only : diag_remap_diag_registration_closed
 use MOM_diag_remap,       only : horizontally_average_diag_field
+use MOM_diag_vkernels,    only : reintegrate_column
 
 use diag_axis_mod, only : get_diag_axis_name
 use diag_data_mod, only : null_axis_id
@@ -42,6 +43,8 @@ use diag_manager_mod, only : get_diag_field_id_fms=>get_diag_field_id
 use diag_manager_mod, only : DIAG_FIELD_NOT_FOUND
 
 implicit none ; private
+
+#include <MOM_memory.h>
 
 #undef __DO_SAFETY_CHECKS__
 #define IMPLIES(A, B) ((.not. (A)) .or. (B))
@@ -65,6 +68,7 @@ public diag_set_state_ptrs, diag_update_remap_grids
 public diag_grid_storage_init, diag_grid_storage_end
 public diag_copy_diag_to_storage, diag_copy_storage_to_diag
 public diag_save_grids, diag_restore_grids
+public post_horizontal_transport_diag, post_vertical_transport_diag, allocate_remapped_transport_arrays
 
 !> Make a diagnostic available for averaging or output.
 interface post_data
@@ -177,7 +181,7 @@ integer :: MSK=-1   !< Use the downsample method of a mask
 !! into this array. The secondaries are 'variations' on the primary diagnostic.
 !! For example the CMOR diagnostics are secondary. The secondary diagnostics
 !! are kept in a list with the primary diagnostic as the head.
-type, private :: diag_type
+type, public :: diag_type; private
   logical :: in_use !< True if this entry is being used.
   integer :: fms_diag_id !< Underlying FMS diag_manager id.
   integer :: fms_xyave_diag_id = -1 !< For a horizontally area-averaged diagnostic.
@@ -1522,7 +1526,8 @@ end subroutine post_data_2d_low
 
 !> Calculate and post a vertical transport-like diagnostic by integrating the convergence of mass transports,
 !! integrating from the bottom up. Note this needs to be done after the umo and vmo have been remapped
-subroutine post_vertical_transport_diag( G, GV, diag_field_id, uh_native, vh_native, diag_cs )
+subroutine post_vertical_transport_diag( G, GV, diag_field_id, uh_native, vh_native, diag_cs, &
+                                         surface, bottom, internal )
   type(ocean_grid_type),                     intent(in) :: G   !< ocean grid structure
   type(verticalGrid_type),                   intent(in) :: GV  !< ocean vertical grid structure
   integer,                                   intent(in) :: diag_field_id !< The id for an output variable returned by a
@@ -1531,39 +1536,105 @@ subroutine post_vertical_transport_diag( G, GV, diag_field_id, uh_native, vh_nat
                                                                      !! used to advect tracers [H L2 ~> m3 or kg]
   real, dimension(SZI_(G),SZJB_(G),SZK_(G)), intent(in) :: vh_native !< Accumulated meridional thickness fluxes
                                                                      !! used to advect tracers [H L2 ~> m3 or kg]
-  type(diag_ctrl), target,                   intent(in) :: diag_CS !< Structure used to regulate diagnostic output
-  real, dimension(:,:,:) :: wmo, uh, vh
-  type(diag_type) :: diag
+  type(diag_ctrl), target,                   intent(inout) :: diag_cs !< Structure used to regulate diagnostic output
+  real, dimension(SZI_(G),SZJ_(G)), optional, intent(in) :: surface !< Any additional terms that apply just to the
+                                                                    !! surface interface
+  real, dimension(SZI_(G),SZJ_(G)), optional, intent(in) :: bottom  !< Any additional terms that apply just to the
+                                                                    !! bottom interface
+  real, dimension(SZI_(G),SZJ_(G),SZK_(G)), optional, intent(in) :: internal !< Any other internal source/sink of mass
+                                                                             !! within a layer, i.e. evaporation
+
+  real, dimension(:,:,:), pointer :: wmo, uh, vh
+  real :: htot
+  type(diag_type), pointer :: diag
   type(diag_remap_ctrl), pointer :: diag_remap_cs
 
-  integer :: i, j, k, is, ie, js, je, nz
+  integer :: i, j, k, m, is, ie, js, je, nz
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec
   ! Check to see if the wmo is needed on the native grid
   if (diag_cs%needs_wmo) then
     nz = G%ke+1
-    do j=js,je; do i=is;ie
-      diag_cs%wmo(i,j,nz) = 0.
-    enddo; enddo
+
+    ! Apply internal sources of mass/thickness
+    if (present(internal)) then
+      do k=1,nz; do j=js,je; do i=is,ie
+        diag_cs%wmo(i,j,k) = internal(i,j,k)
+      enddo; enddo; enddo
+    else ! Initialize wmo to 0
+      do k=1,nz; do j=js,je; do i=is,ie
+        diag_cs%wmo(i,j,k) = 0.
+      enddo; enddo; enddo
+    endif
+    ! Apply additional terms present only at the surface and bottom interfaces
+    if (present(surface)) then
+      do j=js,je; do i=is,ie
+        diag_cs%wmo(i,j,1)  = diag_cs%wmo(i,j,1) + surface(i,j)
+      enddo; enddo
+    endif
+    if (present(bottom)) then
+      do j=js,je; do i=is,ie
+        diag_cs%wmo(i,j,nz) = diag_cs%wmo(i,j,nz) + bottom(i,j)
+      enddo; enddo
+    endif
     do k=nz-1,1,-1; do j=js,je; do i=is,ie
-      diag_cs%wmo(i,j,k) = diag_cs%wmo(i,j,k+1) + ((uh_native(I,j,k) - uh_native(I-1,j,k)) &
-                                                +  (vh_native(i,J,k) - vh_native(i,J-1,k)))
+      diag_cs%wmo(i,j,k) = wmo(i,j,k) + (diag_cs%wmo(i,j,k+1) + ((uh_native(I,j,k) - uh_native(I-1,j,k)) &
+                                                              +  (vh_native(i,J,k) - vh_native(i,J-1,k))))
     enddo; enddo; enddo
   endif
 
   ! Sweep through all diagnostic coordinates and check to see if we need to calculate wmo. This catches the case
   ! where another diagnostic depends on wmo, but wmo is not requested
-  do i=1,diag_cs%num_diag_coords
-    diag_remap_cs = diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+  do m=1,diag_cs%num_diag_coords
+    diag_remap_cs = diag_cs%diag_remap_cs(m)
     if (diag_remap_cs%remap_wmo) then
       nz = diag%axes%nz+1
       uh => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%umo
       vh => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%vmo
       wmo => diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)%wmo
-      do j=js,je; do i=is;ie
-        wmo(i,j,nz) = 0.
-      enddo; enddo
+
+      ! Remap the internal source to the diagnostic grid
+      if (present(internal)) then
+        do j=js,je; do i=is,ie
+          ! Remap any internal sources of mass/thickness
+          call reintegrate_column(G%ke, diag_cs%h_begin, internal(i,j,:), nz, diag_remap_cs%h_extensive, 0., wmo(i,j,:))
+        enddo; enddo
+      else ! Otherwise initialize to 0
+        do k= 1,nz; do j=js,je; do i=is,ie
+          diag_cs%wmo(i,j,k) = 0.
+        enddo; enddo; enddo
+      endif
+      if (present(surface)) then
+        do j=js,je; do i=is,ie
+          diag_cs%wmo(i,j,1)  = diag_cs%wmo(i,j,1) + surface(i,j)
+        enddo; enddo
+      endif
+      if (present(bottom)) then
+        do j=js,je; do i=is,ie
+          diag_cs%wmo(i,j,nz) = diag_cs%wmo(i,j,nz) + bottom(i,j)
+        enddo; enddo
+      endif
+
+      ! Apply any coordinate specific terms
+      select case(diag_remap_cs%diag_coord_name)
+        case('ZSTAR')
+          do j=js,je; do i=is,ie
+            htot = 0.
+            do k=1,nz
+              htot = htot + h(i,j,k)
+            enddo
+            stretching = htot/(G%bathyT(i,j) + ssh(i,j))
+            do k=1,nz
+              wmo(i,j,k) = wmo(i,j,k) + h(
+            enddo
+
+            ! stretching =
+          enddo; enddo
+
+
+      end select
+
       do k=nz-1,1,-1; do j=js,je; do i=is,ie
-        wmo(i,j,k) = wmo(i,j,k+1) + ((uh(I,j,k) - uh(I-1,j,k)) + (vh(i,J,k) - vh(i,J-1,k)))
+        wmo(i,j,k) = wmo(i,j,k) + (wmo(i,j,k+1) + ((uh(I,j,k) - uh(I-1,j,k)) + (vh(i,J,k) - vh(i,J-1,k))))
       enddo; enddo; enddo
     endif
   enddo
@@ -1586,15 +1657,18 @@ end subroutine post_vertical_transport_diag
 
 !> Post a horizontal transport-like diagnostic including remapping as necessary.
 subroutine post_horizontal_transport_diag(diag_field_id, transport, diag_cs, grid_type )
-  integer,                 intent(in) :: diag_field_id !< The id for an output variable returned by a
+  integer,                        intent(in) :: diag_field_id !< The id for an output variable returned by a
                                                        !! previous call to register_diag_field.
-  real, dimension(:,:,:),  intent(in) :: transport !< A horizontal mass transport
-  type(diag_ctrl), target, intent(in) :: diag_CS   !< Structure used to regulate diagnostic output
-  character,               intent(in) :: grid_type !< Either 'U' or 'V' (case-insensitive) depending on whether
+  real, dimension(:,:,:), target, intent(in) :: transport !< A horizontal mass transport
+  type(diag_ctrl),        target, intent(in) :: diag_CS   !< Structure used to regulate diagnostic output
+  character,                      intent(in) :: grid_type !< Either 'U' or 'V' (case-insensitive) depending on whether
                                                    !! the transport is on the U or V grid
   logical :: staggered_in_x, do_remap
   real, dimension(:,:,:), pointer :: remapped_array, diag_array
 
+  integer :: i
+  type(diag_remap_ctrl) :: diag_remap_cs
+  type(diag_type), pointer :: diag
 
   select case(lowercase(grid_type))
     case ('u')
@@ -1607,13 +1681,13 @@ subroutine post_horizontal_transport_diag(diag_field_id, transport, diag_cs, gri
 
   ! Sweep through all diagnostic coordinates and check to see if we need to remap and store the transport.
   do i=1,diag_cs%num_diag_coords
-    diag_remap_cs = diag_cs%diag_remap_cs(diag%axes%vertical_coordinate_number)
+    diag_remap_cs = diag_cs%diag_remap_cs(i)
     if (staggered_in_x) then
       remapped_array => diag_remap_cs%umo
-      do_remap = diag_remap_cs%needs_umo
+      do_remap = diag_remap_cs%remap_umo
     else
       remapped_array => diag_remap_cs%vmo
-      do_remap = diag_remap_cs%needs_vmo
+      do_remap = diag_remap_cs%remap_vmo
     endif
     if (do_remap) call vertically_reintegrate_diag_field(diag_remap_cs, diag_cs%G, diag_cs%h_begin, &
                          diag_remap_cs%h_extensive, staggered_in_x, .not. staggered_in_x,           &
@@ -2227,12 +2301,14 @@ integer function register_diag_field(module_name, field_name, axes_in, init_time
                      conversion=conversion, v_extensive=v_extensive)
           if (active) then
             call diag_remap_set_active(diag_cs%diag_remap_cs(i))
-            if (present(needs_umo)) diag_cs%diag_remap_cs(i)%remap_umo .or. needs_umo
-            if (present(needs_vmo)) diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_vmo
+            if (present(needs_umo)) diag_cs%diag_remap_cs(i)%remap_umo = &
+                                      diag_cs%diag_remap_cs(i)%remap_umo .or. needs_umo
+            if (present(needs_vmo)) diag_cs%diag_remap_cs(i)%remap_umo = &
+                                      diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_vmo
             if (present(needs_wmo)) then
-              diag_cs%diag_remap_cs(i)%remap_umo .or. needs_wmo
-              diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_wmo
-              diag_cs%diag_remap_cs(i)%remap_wmo .or. needs_wmo
+              diag_cs%diag_remap_cs(i)%remap_umo = diag_cs%diag_remap_cs(i)%remap_umo .or. needs_wmo
+              diag_cs%diag_remap_cs(i)%remap_vmo = diag_cs%diag_remap_cs(i)%remap_vmo .or. needs_wmo
+              diag_cs%diag_remap_cs(i)%remap_wmo = diag_cs%diag_remap_cs(i)%remap_wmo .or. needs_wmo
             endif
           endif
           module_list = trim(module_list)//","//trim(new_module_name)

@@ -113,10 +113,10 @@ type :: diag_remap_ctrl
   integer :: nz = 0 !< Number of vertical levels used for remapping
   real, dimension(:,:,:), allocatable :: h !< Remap grid thicknesses [H ~> m or kg m-2]
   real, dimension(:,:,:), allocatable :: h_extensive !< Remap grid thicknesses for extensive
-                                           !! variables [H ~> m or kg m-2]
-  real, dimension(:,:,:), allocatable :: umo !< Remapped zonal mass transport [R Z L2 T-1 ~> kg s-1]
-  real, dimension(:,:,:), allocatable :: vmo !< Remapped meridional mass transport [R Z L2 T-1 ~> kg s-1]
-  real, dimension(:,:,:), allocatable :: wmo !< Vertical mass transport from umo and vmo [R Z L2 T-1 ~> kg s-1]
+                                   !! variables [H ~> m or kg m-2]
+  real, dimension(:,:,:), pointer :: umo !< Remapped zonal mass transport [R Z L2 T-1 ~> kg s-1]
+  real, dimension(:,:,:), pointer :: vmo !< Remapped meridional mass transport [R Z L2 T-1 ~> kg s-1]
+  real, dimension(:,:,:), pointer :: wmo !< Vertical mass transport from umo and vmo [R Z L2 T-1 ~> kg s-1]
   logical :: remap_umo=.false. !< If true, umo should be remapped and stored
   logical :: remap_vmo=.false. !< If true, vmo should be remapped and stored
   logical :: remap_wmo=.false. !< If true, wmo should be remapped and stored
@@ -157,9 +157,9 @@ subroutine diag_remap_end(remap_cs)
 
   if (allocated(remap_cs%h)) deallocate(remap_cs%h)
   if (allocated(remap_cs%h_extensive)) deallocate(remap_cs%h_extensive)
-  if (allocated(remap_cs%umo)) deallocate(remap_cs%umo)
-  if (allocated(remap_cs%vmo)) deallocate(remap_cs%vmo)
-  if (allocated(remap_cs%wmo)) deallocate(remap_cs%wmo)
+  if (associated(remap_cs%umo)) deallocate(remap_cs%umo)
+  if (associated(remap_cs%vmo)) deallocate(remap_cs%vmo)
+  if (associated(remap_cs%wmo)) deallocate(remap_cs%wmo)
   remap_cs%configured = .false.
   remap_cs%initialized = .false.
   remap_cs%used = .false.
