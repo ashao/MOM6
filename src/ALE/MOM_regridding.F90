@@ -20,6 +20,7 @@ use regrid_consts, only : REGRIDDING_LAYER, REGRIDDING_ZSTAR
 use regrid_consts, only : REGRIDDING_RHO, REGRIDDING_SIGMA
 use regrid_consts, only : REGRIDDING_ARBITRARY, REGRIDDING_SIGMA_SHELF_ZSTAR
 use regrid_consts, only : REGRIDDING_HYCOM1, REGRIDDING_SLIGHT, REGRIDDING_ADAPTIVE
+use regrid_consts, only : REGRIDDING_OPT_BC
 use regrid_interp, only : interp_CS_type, set_interp_scheme, set_interp_extrap
 
 use coord_zlike,  only : init_coord_zlike, zlike_CS, set_zlike_params, build_zstar_column, end_coord_zlike
@@ -29,6 +30,9 @@ use coord_rho,    only : old_inflate_layers_1d
 use coord_hycom,  only : init_coord_hycom, hycom_CS, set_hycom_params, build_hycom1_column, end_coord_hycom
 use coord_slight, only : init_coord_slight, slight_CS, set_slight_params, build_slight_column, end_coord_slight
 use coord_adapt,  only : init_coord_adapt, adapt_CS, set_adapt_params, build_adapt_column, end_coord_adapt
+use coord_opt_bc, only : init_coord_opt_bc, opt_bc_CS, set_opt_bc_params
+use coord_opt_bc, only : build_opt_bc_column, end_coord_opt_bc
+use coord_opt_bc, only : OPT_BC_CHEBYSHEV, OPT_BC_COSINE
 
 implicit none ; private
 
@@ -123,6 +127,7 @@ type, public :: regridding_CS ; private
   type(hycom_CS),  pointer :: hycom_CS  => null() !< Control structure for hybrid coordinate generator
   type(slight_CS), pointer :: slight_CS => null() !< Control structure for Slight-coordinate generator
   type(adapt_CS),  pointer :: adapt_CS  => null() !< Control structure for adaptive coordinate generator
+  type(opt_bc_CS),  pointer :: opt_bc_CS  => null() !< Control structure for adaptive coordinate generator
 
 end type
 
@@ -202,6 +207,8 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
   real :: dz_fixed_sfc, Rho_avg_depth, nlay_sfc_int
   real :: adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha
   real :: adaptDrho0 ! Reference density difference for stratification-dependent diffusion. [R ~> kg m-3]
+  real :: opt_bc_min_n2
+  integer :: opt_bc_sample_method
   integer :: nz_fixed_sfc, k, nzf(4)
   real, dimension(:), allocatable :: dz     ! Resolution (thickness) in units of coordinate, which may be [m]
                                             ! or [Z ~> m] or [H ~> m or kg m-2] or [R ~> kg m-3] or other units.
@@ -458,6 +465,7 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
     if (coordinateMode(coord_mode) == REGRIDDING_ZSTAR .or. &
         coordinateMode(coord_mode) == REGRIDDING_HYCOM1 .or. &
         coordinateMode(coord_mode) == REGRIDDING_SLIGHT .or. &
+        coordinateMode(coord_mode) == REGRIDDING_OPT_BC .or. &
         coordinateMode(coord_mode) == REGRIDDING_ADAPTIVE) then
       ! Adjust target grid to be consistent with maximum_depth
       tmpReal = sum( dz(:) )
@@ -602,6 +610,25 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
          adaptDoMin=tmpLogical, adaptDrho0=adaptDrho0)
   endif
 
+  if (coordinateMode(coord_mode) == REGRIDDING_OPT_BC) then
+    call get_param(param_file, mdl, "OPT_BC_MIN_N2", opt_bc_min_n2, &
+                   "The minimum allowed N2 allowed in the calculation of the s-coordinate", &
+                   units="s-2", default = 1.e-10, scale=US%s_to_T*US%s_to_T)
+    call get_param(param_file, mdl, "OPT_BC_SAMPLE_METHOD", string, &
+                   "The method to use to sample the s-scoordinate:\n"//  &
+                   "  cosine:    A more evenly spaced grid  \n"//        &
+                   "  chebyshev: Finer resolution near the boundaries",  &
+                   default = "chebyshev")
+    select case (trim(string))
+      case ( "chebyshev" )
+        opt_bc_sample_method = OPT_BC_CHEBYSHEV
+      case ( "cosine" )
+        opt_bc_sample_method = OPT_BC_COSINE
+    end select
+    call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, opt_bc_sample_method = opt_bc_sample_method)
+
+  endif
+
   if (main_parameters .and. coord_is_state_dependent) then
     call get_param(param_file, mdl, "MAXIMUM_INT_DEPTH_CONFIG", string, &
                  "Determines how to specify the maximum interface depths.\n"//&
@@ -743,6 +770,7 @@ subroutine end_regridding(CS)
   if (associated(CS%hycom_CS))  call end_coord_hycom(CS%hycom_CS)
   if (associated(CS%slight_CS)) call end_coord_slight(CS%slight_CS)
   if (associated(CS%adapt_CS))  call end_coord_adapt(CS%adapt_CS)
+  if (associated(CS%opt_bc_CS))  call end_coord_opt_bc(CS%opt_bc_CS)
 
   deallocate( CS%coordinateResolution )
   if (allocated(CS%target_density)) deallocate( CS%target_density )
@@ -819,6 +847,8 @@ subroutine regridding_main( remapCS, CS, G, GV, h, tv, h_new, dzInterface, frac_
     case ( REGRIDDING_ADAPTIVE )
       call build_grid_adaptive(G, GV, G%US, h, tv, dzInterface, remapCS, CS)
       call calc_h_new_by_dz(CS, G, GV, h, dzInterface, h_new)
+    case ( REGRIDDING_OPT_BC )
+      call build_grid_opt_bc(G, GV, G%US, h, tv, h_new, dzInterface, CS)
 
     case default
       call MOM_error(FATAL,'MOM_regridding, regridding_main: '//&
@@ -1493,6 +1523,78 @@ subroutine build_grid_HyCOM1( G, GV, US, h, tv, h_new, dzInterface, CS, frac_she
 
 end subroutine build_grid_HyCOM1
 
+!> Builds a grid that optimally samples vertical baroclinic modes
+subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, CS)
+  type(ocean_grid_type),                     intent(in)    :: G  !< Grid structure
+  type(verticalGrid_type),                   intent(in)    :: GV !< Ocean vertical grid structure
+  type(unit_scale_type),                     intent(in)    :: US !< A dimensional unit scaling type
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in)    :: h  !< Existing model thickness [H ~> m or kg m-2]
+  type(thermo_var_ptrs),                     intent(in)    :: tv !< Thermodynamics structure
+  type(regridding_CS),                       intent(in)    :: CS !< Regridding control structure
+  real, dimension(SZI_(G),SZJ_(G),CS%nk),    intent(inout) :: h_new !< New layer thicknesses [H ~> m or kg m-2]
+  real, dimension(SZI_(G),SZJ_(G),CS%nk+1),  intent(inout) :: dzInterface !< Changes in interface position
+  ! real, dimension(SZI_(G),SZJ_(G)), optional, intent(in)   :: frac_shelf_h !< Fractional
+                                                                    !! ice shelf coverage [nodim]
+
+  ! Local variables
+  real, dimension(SZK_(GV)+1) :: z_col ! Source interface positions relative to the surface [H ~> m or kg m-2]
+  real, dimension(CS%nk+1) :: z_col_new ! New interface positions relative to the surface [H ~> m or kg m-2]
+  real, dimension(SZK_(GV)+1) :: dz_col  ! The realized change in z_col [H ~> m or kg m-2]
+  real, dimension(SZK_(GV))   :: p_col   ! Layer center pressure [Pa]
+  integer   :: i, j, k, nki
+  real :: depth, nominalDepth
+  real :: h_neglect, h_neglect_edge
+  real :: z_top_col, totalThickness
+  logical :: ice_shelf
+
+  nki = min(GV%ke, CS%nk)
+  ! ice_shelf = present(frac_shelf_h)
+  ice_shelf = .false.
+
+  ! Build grid based on target interface densities
+  do j = G%jsc-1,G%jec+1 ; do i = G%isc-1,G%iec+1
+    if (G%mask2dT(i,j)>0.) then
+
+      nominalDepth = G%bathyT(i,j) * GV%Z_to_H
+
+      if (ice_shelf) then
+        totalThickness = 0.0
+        do k=1,GV%ke
+          totalThickness = totalThickness + h(i,j,k) * GV%Z_to_H
+        enddo
+        z_top_col = max(nominalDepth-totalThickness,0.0)
+      else
+        z_top_col = 0.0
+      endif
+
+      z_col(1) = z_top_col ! Work downward rather than bottom up
+      do K = 1, GV%ke
+        z_col(K+1) = z_col(K) + h(i,j,k)
+      enddo
+
+      call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
+                               z_col_new(:), tv%eqn_of_state)
+
+      ! Calculate the final change in grid position after blending new and old grids
+      call filtered_grid_motion( CS, GV%ke, z_col, z_col_new, dz_col )
+
+      ! This adjusts things robust to round-off errors
+      dz_col(:) = -dz_col(:)
+      call adjust_interface_motion( CS, GV%ke, h(i,j,:), dz_col(:) )
+
+      dzInterface(i,j,1:nki+1) = dz_col(1:nki+1)
+      if (nki<CS%nk) dzInterface(i,j,nki+2:CS%nk+1) = 0.
+
+    else ! on land
+      dzInterface(i,j,:) = 0.
+    endif ! mask2dT
+  enddo ; enddo ! i,j
+
+  call calc_h_new_by_dz(CS, G, GV, h, dzInterface, h_new)
+
+end subroutine build_grid_opt_bc
+
+
 !> This subroutine builds an adaptive grid that follows density surfaces where
 !! possible, subject to constraints on the smoothness of interface heights.
 subroutine build_grid_adaptive(G, GV, US, h, tv, dzInterface, remapCS, CS)
@@ -1916,7 +2018,7 @@ function uniformResolution(nk,coordMode,maxDepth,rhoLight,rhoHeavy)
   select case ( scheme )
 
     case ( REGRIDDING_ZSTAR, REGRIDDING_HYCOM1, REGRIDDING_SLIGHT, REGRIDDING_SIGMA_SHELF_ZSTAR, &
-           REGRIDDING_ADAPTIVE )
+           REGRIDDING_ADAPTIVE, REGRIDDING_OPT_BC )
       uniformResolution(:) = maxDepth / real(nk)
 
     case ( REGRIDDING_RHO )
@@ -1960,6 +2062,8 @@ subroutine initCoord(CS, GV, US, coord_mode)
                            CS%interp_CS, GV%m_to_H)
   case (REGRIDDING_ADAPTIVE)
     call init_coord_adapt(CS%adapt_CS, CS%nk, CS%coordinateResolution, GV%m_to_H, US%kg_m3_to_R)
+  case (REGRIDDING_OPT_BC)
+    call init_coord_opt_bc(CS%opt_bc_CS, CS%nk)
   end select
 end subroutine initCoord
 
@@ -2153,7 +2257,7 @@ function getCoordinateUnits( CS )
   character(len=20)               :: getCoordinateUnits
 
   select case ( CS%regridding_scheme )
-    case ( REGRIDDING_ZSTAR, REGRIDDING_HYCOM1, REGRIDDING_SLIGHT, REGRIDDING_ADAPTIVE )
+    case ( REGRIDDING_ZSTAR, REGRIDDING_HYCOM1, REGRIDDING_SLIGHT, REGRIDDING_ADAPTIVE, REGRIDDING_OPT_BC)
       getCoordinateUnits = 'meter'
     case ( REGRIDDING_SIGMA_SHELF_ZSTAR )
       getCoordinateUnits = 'meter/fraction'
@@ -2195,6 +2299,8 @@ function getCoordinateShortName( CS )
       getCoordinateShortName = 's-rho'
     case ( REGRIDDING_ADAPTIVE )
       getCoordinateShortName = 'adaptive'
+    case ( REGRIDDING_OPT_BC )
+      getCoordinateShortName = 'opt_bc'
     case default
       call MOM_error(FATAL,'MOM_regridding, getCoordinateShortName: '//&
                      'Unknown regridding scheme selected!')
@@ -2208,7 +2314,8 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
              compress_fraction, ref_pressure, dz_min_surface, nz_fixed_surface, Rho_ML_avg_depth, &
              nlay_ML_to_interior, fix_haloclines, halocline_filt_len, &
              halocline_strat_tol, integrate_downward_for_e, remap_answers_2018, &
-             adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha, adaptDoMin, adaptDrho0)
+             adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha, adaptDoMin, adaptDrho0, &
+             opt_bc_min_n2, opt_bc_sample_method)
   type(regridding_CS), intent(inout) :: CS !< Regridding control structure
   logical, optional, intent(in) :: boundary_extrapolation !< Extrapolate in boundary cells
   real,    optional, intent(in) :: min_thickness    !< Minimum thickness allowed when building the
@@ -2247,6 +2354,9 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
                                                     !! the depths specified by the regridding coordinate.
   real,    optional, intent(in) :: adaptDrho0       !< Reference density difference for stratification-dependent
                                                     !! diffusion. [R ~> kg m-3]
+  real,    optional, intent(in) :: opt_bc_min_n2    !< The minimum N2 allowed in the optimally sampled
+                                                    !! baroclinic coordinate
+  integer, optional, intent(in) :: opt_bc_sample_method !< The sampling method to use, either Chebyshev or cosine
 
   if (present(interp_scheme)) call set_interp_scheme(CS%interp_CS, interp_scheme)
   if (present(boundary_extrapolation)) call set_interp_extrap(CS%interp_CS, boundary_extrapolation)
@@ -2305,6 +2415,9 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
     if (present(adaptAlpha))     call set_adapt_params(CS%adapt_CS, adaptAlpha=adaptAlpha)
     if (present(adaptDoMin))     call set_adapt_params(CS%adapt_CS, adaptDoMin=adaptDoMin)
     if (present(adaptDrho0))     call set_adapt_params(CS%adapt_CS, adaptDrho0=adaptDrho0)
+  case (REGRIDDING_OPT_BC)
+    if (present(opt_bc_min_N2)) call set_opt_bc_params(CS%opt_bc_CS, min_N2 = opt_bc_min_N2)
+    if (present(opt_bc_sample_method)) call set_opt_bc_params(CS%opt_bc_CS, sample_method = opt_bc_sample_method)
   end select
 
 end subroutine set_regrid_params
