@@ -27,6 +27,7 @@ type, public :: opt_bc_CS ; private
   ! TODO: Add min_N2 get_param call
   !> Minimum (positive) buoyancy frequency (s^-2, this is from Jeffrey Early's code)
   real :: min_N2 = 1.e-10
+  real :: max_N2 = 1.e-4
 
   ! TODO: Add sample_method to get_param call
   !> Which basis to use (cosine or chebyshev)
@@ -40,6 +41,7 @@ type, public :: opt_bc_CS ; private
 end type opt_bc_CS
 
 public init_coord_opt_bc, set_opt_bc_params, build_opt_bc_column
+public adjust_opt_bc_surface
 public coord_opt_bc_unit_tests
 public end_coord_opt_bc
 
@@ -67,16 +69,18 @@ subroutine end_coord_opt_bc(CS)
 end subroutine end_coord_opt_bc
 
 !> This subroutine can be used to set the parameters for the coord_opt_bc module
-subroutine set_opt_bc_params(CS, min_thickness, min_N2, sample_method )
+subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method )
   type(opt_bc_CS),      pointer    :: CS !< Coordinate control structure
   real,    optional, intent(in) :: min_thickness !< Minimum allowed thickness [H ~> m or kg m-2]
   real,    optional, intent(in) :: min_N2 !< Minimum N2 allowed
+  real,    optional, intent(in) :: max_N2 !< Maximum N2 allowed
   integer, optional, intent(in) :: sample_method !< The way to sample the 's' coordinate
 
   if (.not. associated(CS)) call MOM_error(FATAL, "set_opt_bc_params: CS not associated")
 
   if (present(min_thickness)) CS%min_thickness = min_thickness
   if (present(min_N2)) CS%min_N2 = min_N2
+  if (present(max_N2)) CS%max_N2 = max_N2
   if (present(sample_method)) CS%sample_method = sample_method
 end subroutine set_opt_bc_params
 
@@ -98,6 +102,7 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
 
   ! Local variables
   integer :: k, kidx
+  integer :: k_thin
   real, dimension(nz+1) :: pres     ! Pressures used to calculate density [R L2 T-2 ~> Pa]
   real, dimension(nz+1) :: T_int, S_int! Derivatives of density
   real, dimension(nz+1) :: drho_dT, drho_dS ! Derivatives of density
@@ -146,7 +151,8 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
 
   N(1) = SQRT(CS%min_N2) ; N(nz+1) = SQRT(CS%min_N2)
   do K=2,nz
-    N(k) = SQRT(max((CS%min_N2), (GV%g_Earth/GV%Rho0)*(-I_dz_int(K) * (drho_dT(K) * (T(k-1)-T(k)) + drho_dS(K) * (S(k-1)-S(k))))))
+    N(k) = SQRT(MAX((CS%min_N2), (GV%g_Earth/GV%Rho0)*(-I_dz_int(K) * (drho_dT(K) * (T(k-1)-T(k)) + drho_dS(K) * (S(k-1)-S(k))))))
+    N(k) = MIN(N(k), SQRT(CS%max_N2))
   enddo
 
   ! Calculate the stretched coordinate from the bottom up s.t. s = 0 corresponds to the bottom
@@ -176,10 +182,38 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
   ! TODO: Fix this up to make sure that the top interface is 0 and bottom is bathyT
   ! Interpolate from eta on the scaled grid back to eta on the s-grid
   z_interface(:) = interp_linear( s_unscaled, eta_orig, s_scaled )
-  z_interface(1) = 0.
+  z_interface(1) = eta_orig(1)
   z_interface(CS%nk+1) = eta_orig(nz+1)
 
 end subroutine build_opt_bc_column
+
+!> Take care of the cases where the interpolated interfaces are less than the desired minimum thickness
+!! by linearly spacing interfaces at the top and bottom.
+subroutine adjust_opt_bc_surface( CS, nk, h )
+  type(opt_bc_CS),        intent(in)    :: CS !< coord_opt_bc control structure
+  integer,                intent(in)    :: nk !< Number of levels on source grid (i.e. length of  h, T, S)
+  real, dimension(nk),    intent(inout) :: h  !< The thicknesses to be adjusted
+
+  integer :: k, k_thin
+  real :: htot
+
+  htot = 0.
+  k_thin = 1
+
+  do k = 1,CS%nk
+    htot = htot + h(k)
+    k_thin = k
+    if ( htot >= k*CS%min_thickness ) then
+      exit
+    endif
+  enddo
+
+  do k=1,k_thin
+    h(k) = htot/k_thin
+  enddo
+
+end subroutine adjust_opt_bc_surface
+
 
 !> Perform simple tests of the opt_bc/cosine scaled coordinates
 function coord_opt_bc_unit_tests( verbose ) result( failed )
