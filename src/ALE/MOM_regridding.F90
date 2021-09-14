@@ -33,7 +33,7 @@ use coord_adapt,  only : init_coord_adapt, adapt_CS, set_adapt_params, build_ada
 use coord_opt_bc, only : init_coord_opt_bc, opt_bc_CS, set_opt_bc_params
 use coord_opt_bc, only : build_opt_bc_column, end_coord_opt_bc
 use coord_opt_bc, only : OPT_BC_CHEBYSHEV, OPT_BC_COSINE, create_stewart_boundary_layer_grid, merge_opt_bc_stewart
-use coord_opt_bc, only : initialize_stewart_grid
+use coord_opt_bc, only : initialize_stewart_grid, adjust_opt_bc_surface
 
 implicit none ; private
 

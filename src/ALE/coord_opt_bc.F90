@@ -120,7 +120,7 @@ subroutine initialize_stewart_grid( CS )
 end subroutine initialize_stewart_grid
 
 !> This subroutine can be used to set the parameters for the coord_opt_bc module
-subroutine set_opt_bc_params(CS, min_thickness, min_N2, sample_method, &
+subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method, &
   hybridize_stewart, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max )
   type(opt_bc_CS),      pointer    :: CS !< Coordinate control structure
   real,    optional, intent(in) :: min_thickness !< Minimum allowed thickness [H ~> m or kg m-2]
