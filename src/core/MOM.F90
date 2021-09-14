@@ -128,6 +128,8 @@ use MOM_verticalGrid,          only : fix_restart_scaling
 use MOM_verticalGrid,          only : get_thickness_units, get_flux_units, get_tr_flux_units
 use MOM_wave_interface,        only : wave_parameters_CS, waves_end
 use MOM_wave_interface,        only : Update_Stokes_Drift
+use MOM_CVMix_KPP,             only : KPP_CS
+use MOM_energetic_PBL,         only : energetic_PBL_CS
 
 ! ODA modules
 use MOM_oda_driver_mod,        only : ODA_CS, oda, init_oda, oda_end
@@ -1247,6 +1249,9 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
                   optional, pointer       :: Waves  !< Container for wave related parameters
                                                     !! the fields in Waves are intent in here.
 
+  type(KPP_CS), pointer :: KPP_CSp
+  type(energetic_PBL_CS), pointer :: ePBL_CSp
+
   logical :: use_ice_shelf ! Needed for selecting the right ALE interface.
   logical :: showCallTree
   type(group_pass_type) :: pass_T_S, pass_T_S_h, pass_uv_T_S_h
@@ -1263,6 +1268,8 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
   if (associated(CS%frac_shelf_h)) use_ice_shelf = .true.
 
   call enable_averages(dtdia, Time_end_thermo, CS%diag)
+
+  call extract_diabatic_member(CS%diabatic_CSp, KPP_CSp = KPP_CSp, energetic_PBL_CSp = ePBL_CSp)
 
   if (associated(CS%odaCS)) then
     call apply_oda_tracer_increments(US%T_to_s*dtdia, G, GV, tv, h, CS%odaCS)
@@ -1336,9 +1343,10 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
       call cpu_clock_begin(id_clock_ALE)
       if (use_ice_shelf) then
         call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
-                      dtdia, CS%frac_shelf_h)
+                      ePBL_CSp, KPP_CSp, dtdia, CS%frac_shelf_h)
       else
-        call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, dtdia)
+        call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
+                      ePBL_CSp, KPP_CSp, dtdia)
       endif
 
       if (showCallTree) call callTree_waypoint("finished ALE_main (step_MOM_thermo)")
@@ -2526,10 +2534,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
     call adjustGridForIntegrity(CS%ALE_CSp, G, GV, CS%h )
     call callTree_waypoint("Calling ALE_main() to remap initial conditions (initialize_MOM)")
     if (use_ice_shelf) then
-      call ALE_main(G, GV, US, CS%h, CS%u, CS%v, CS%tv, CS%tracer_Reg, CS%ALE_CSp, &
-                    CS%OBC, frac_shelf_h=CS%frac_shelf_h)
+      call ALE_main(G, GV, US, CS%h, CS%u, CS%v, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, NULL(), NULL(), &
+                    frac_shelf_h = CS%frac_shelf_h)
     else
-      call ALE_main( G, GV, US, CS%h, CS%u, CS%v, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC)
+      call ALE_main(G, GV, US, CS%h, CS%u, CS%v, CS%tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, NULL(), NULL())
     endif
 
     call cpu_clock_begin(id_clock_pass_init)

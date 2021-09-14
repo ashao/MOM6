@@ -10,11 +10,13 @@ module MOM_ALE
 
 ! This file is part of MOM6. See LICENSE.md for the license.
 
+use MOM_CVMix_KPP,        only : KPP_get_BLD, KPP_CS
 use MOM_debugging,        only : check_column_integrals
 use MOM_diag_mediator,    only : register_diag_field, post_data, diag_ctrl
 use MOM_diag_mediator,    only : time_type, diag_update_remap_grids
 use MOM_diag_vkernels,    only : interpolate_column, reintegrate_column
 use MOM_domains,          only : create_group_pass, do_group_pass, group_pass_type
+use MOM_energetic_PBL,    only : energetic_PBL_get_MLD, energetic_PBL_CS
 use MOM_EOS,              only : calculate_density
 use MOM_domains,          only : create_group_pass, do_group_pass, group_pass_type
 use MOM_error_handler,    only : MOM_error, FATAL, WARNING
@@ -99,6 +101,8 @@ type, public :: ALE_CS ; private
   integer :: id_vert_remap_h = -1      !< diagnostic id for layer thicknesses used for remapping
   integer :: id_vert_remap_h_tendency = -1 !< diagnostic id for layer thickness tendency due to ALE
 
+  type(KPP_CS), pointer :: KPP_CSp => NULL()
+  type(energetic_PBL_CS), pointer :: ePBL_CSp => NULL()
 end type
 
 ! Publicly available functions
@@ -318,7 +322,7 @@ end subroutine ALE_end
 !! the old grid and the new grid. The creation of the new grid can be based
 !! on z coordinates, target interface densities, sigma coordinates or any
 !! arbitrary coordinate system.
-subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, dt, frac_shelf_h)
+subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, ePBL_CSp, KPP_CSp, dt, frac_shelf_h)
   type(ocean_grid_type),                      intent(in)    :: G   !< Ocean grid informations
   type(verticalGrid_type),                    intent(in)    :: GV  !< Ocean vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US  !< A dimensional unit scaling type
@@ -330,6 +334,8 @@ subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, dt, frac_shelf_h)
   type(tracer_registry_type),                 pointer       :: Reg !< Tracer registry structure
   type(ALE_CS),                               pointer       :: CS  !< Regridding parameters and options
   type(ocean_OBC_type),                       pointer       :: OBC !< Open boundary structure
+  type(energetic_PBL_CS),           pointer  :: ePBL_CSp
+  type(KPP_CS) ,                    pointer  :: KPP_CSp
   real,                             optional, intent(in)    :: dt  !< Time step between calls to ALE_main [T ~> s]
   real, dimension(SZI_(G),SZJ_(G)), optional, intent(in)       :: frac_shelf_h !< Fractional ice shelf coverage [nondim]
   ! Local variables
@@ -338,6 +344,7 @@ subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, dt, frac_shelf_h)
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)) :: h_new ! New 3D grid obtained after last time step [H ~> m or kg-2]
   integer :: nk, i, j, k, isc, iec, jsc, jec
   logical :: ice_shelf
+  real, dimension(SZI_(G),SZJ_(G))           :: hbl         !< Boundary layer depth [H ~> m or kg m-2]
 
   nk = GV%ke; isc = G%isc; iec = G%iec; jsc = G%jsc; jec = G%jec
 
@@ -361,12 +368,17 @@ subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, dt, frac_shelf_h)
   endif
   dzRegrid(:,:,:) = 0.0
 
+  hbl(:,:) = 0.
+  if (ASSOCIATED(CS%KPP_CSp)) call KPP_get_BLD(CS%KPP_CSp, hbl, G, US, m_to_BLD_units=GV%m_to_H)
+  if (ASSOCIATED(CS%ePBL_CSp)) call energetic_PBL_get_MLD(CS%ePBL_CSp, hbl, G, US, &
+                                                                   m_to_MLD_units=GV%m_to_H)
+
   ! Build new grid. The new grid is stored in h_new. The old grid is h.
   ! Both are needed for the subsequent remapping of variables.
   if (ice_shelf) then
-    call regridding_main( CS%remapCS, CS%regridCS, G, GV, h, tv, h_new, dzRegrid, frac_shelf_h)
+    call regridding_main( CS%remapCS, CS%regridCS, G, GV, h, tv, h_new, dzRegrid, frac_shelf_h, hbl = hbl)
   else
-    call regridding_main( CS%remapCS, CS%regridCS, G, GV, h, tv, h_new, dzRegrid)
+    call regridding_main( CS%remapCS, CS%regridCS, G, GV, h, tv, h_new, dzRegrid, hbl = hbl)
   endif
 
   call check_grid( G, GV, h, 0. )
