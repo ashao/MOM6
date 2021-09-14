@@ -369,8 +369,8 @@ subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, ePBL_CSp, KPP_CSp, dt
   dzRegrid(:,:,:) = 0.0
 
   hbl(:,:) = 0.
-  if (ASSOCIATED(CS%KPP_CSp)) call KPP_get_BLD(CS%KPP_CSp, hbl, G, US, m_to_BLD_units=GV%m_to_H)
-  if (ASSOCIATED(CS%ePBL_CSp)) call energetic_PBL_get_MLD(CS%ePBL_CSp, hbl, G, US, &
+  if (ASSOCIATED(KPP_CSp)) call KPP_get_BLD(KPP_CSp, hbl, G, US, m_to_BLD_units=GV%m_to_H)
+  if (ASSOCIATED(ePBL_CSp)) call energetic_PBL_get_MLD(ePBL_CSp, hbl, G, US, &
                                                                    m_to_MLD_units=GV%m_to_H)
 
   ! Build new grid. The new grid is stored in h_new. The old grid is h.
