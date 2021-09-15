@@ -274,9 +274,10 @@ subroutine build_opt_bc_column(CS, GV, nz, nk_boundary_layer, h, T, S, eta_orig,
 end subroutine build_opt_bc_column
 
 !> Merge the z*-like stewart grids with the previously computed Gauss-Lobatto grid
-subroutine merge_opt_bc_stewart( CS, GV, z_gl, nk_st, z_interface_out)
+subroutine merge_opt_bc_stewart( CS, GV, z_bottom, z_gl, nk_st, z_interface_out)
   type(opt_bc_CS),          intent(in) :: CS !< coord_opt_bc control structure
   type(verticalGrid_type),  intent(in) :: GV !< Vertical grid structure
+  real,                     intent(in) :: z_bottom !< The depth of the column
   real, dimension(CS%nk+1), intent(in) :: z_gl !< The interfaces from the Gauss-Lobatto grid
   integer,                  intent(in) :: nk_st !< The number of layers of the Stewart grid within the boundary layer
   real, dimension(GV%ke+1), intent(  out) :: z_interface_out !< The merged Stewart and Gauss-Lobatto grids
@@ -289,8 +290,8 @@ subroutine merge_opt_bc_stewart( CS, GV, z_gl, nk_st, z_interface_out)
   z_interface_out(1) = 0.
   do k=2,GV%ke+1
     if (k_st <= nk_st+1) then
-      if (CS%stewart_z_interface(k_st) < z_gl(k_gl)) then
-        z_interface_out(k) = CS%stewart_z_interface(k_st)
+      if ( min(CS%stewart_z_interface(k_st),z_bottom) <= z_gl(k_gl)) then
+        z_interface_out(k) = min(CS%stewart_z_interface(k_st), z_bottom)
         k_st = k_st + 1
       else
         z_interface_out(k) = z_gl(k_gl)

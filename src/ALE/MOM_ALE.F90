@@ -15,7 +15,7 @@ use MOM_debugging,        only : check_column_integrals
 use MOM_diag_mediator,    only : register_diag_field, post_data, diag_ctrl
 use MOM_diag_mediator,    only : time_type, diag_update_remap_grids
 use MOM_diag_vkernels,    only : interpolate_column, reintegrate_column
-use MOM_domains,          only : create_group_pass, do_group_pass, group_pass_type
+use MOM_domains,          only : create_group_pass, do_group_pass, group_pass_type, pass_var
 use MOM_energetic_PBL,    only : energetic_PBL_get_MLD, energetic_PBL_CS
 use MOM_EOS,              only : calculate_density
 use MOM_domains,          only : create_group_pass, do_group_pass, group_pass_type
@@ -372,6 +372,7 @@ subroutine ALE_main( G, GV, US, h, u, v, tv, Reg, CS, OBC, ePBL_CSp, KPP_CSp, dt
   if (ASSOCIATED(KPP_CSp)) call KPP_get_BLD(KPP_CSp, hbl, G, US, m_to_BLD_units=GV%m_to_H)
   if (ASSOCIATED(ePBL_CSp)) call energetic_PBL_get_MLD(ePBL_CSp, hbl, G, US, &
                                                                    m_to_MLD_units=GV%m_to_H)
+  call pass_var(hbl,G%Domain)
 
   ! Build new grid. The new grid is stored in h_new. The old grid is h.
   ! Both are needed for the subsequent remapping of variables.

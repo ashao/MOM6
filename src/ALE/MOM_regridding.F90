@@ -1622,14 +1622,14 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
       call create_stewart_boundary_layer_grid( CS%opt_bc_CS, GV, hbl(i,j), nk_boundary_layer)
       call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_boundary_layer, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
                                z_col_tmp(1:CS%nk+1-nk_boundary_layer), tv%eqn_of_state)
-      call merge_opt_bc_stewart( CS%opt_bc_CS, GV, z_col_tmp, nk_boundary_layer, z_col_new )
+      call merge_opt_bc_stewart( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_tmp, nk_boundary_layer, z_col_new )
 
       ! Calculate the final change in grid position after blending new and old grids
       call filtered_grid_motion( CS, GV%ke, z_col, z_col_new, dz_col )
 
       ! This adjusts things robust to round-off errors
       dz_col(:) = -dz_col(:)
-      call adjust_interface_motion( CS, GV%ke, h(i,j,:), dz_col(:) )
+      call adjust_interface_motion( CS, GV%ke, h(i,j,:), dz_col(:))
 
       dzInterface(i,j,1:nki+1) = dz_col(1:nki+1)
       if (nki<CS%nk) dzInterface(i,j,nki+2:CS%nk+1) = 0.
@@ -1866,8 +1866,12 @@ subroutine adjust_interface_motion( CS, nk, h_old, dz_int )
                      'Repeated adjustment for roundoff h<0 failed!')
     endif
   enddo
- if (dz_int(1)/=0.) stop 'MOM_regridding: adjust_interface_motion() surface moved'
- if (dz_int(nk+1)/=0.) stop 'MOM_regridding: adjust_interface_motion() surface moved'
+ if (dz_int(1)/=0.) then
+  call MOM_error(FATAL,'MOM_regridding: adjust_interface_motion() surface moved')
+ endif
+ if (dz_int(nk+1)/=0.) then
+  call MOM_error(FATAL,'MOM_regridding: adjust_interface_motion() bottom moved')
+ endif
 
 end subroutine adjust_interface_motion
 
