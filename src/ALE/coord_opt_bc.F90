@@ -287,21 +287,23 @@ subroutine merge_opt_bc_stewart( CS, GV, z_bottom, z_gl, nk_st, z_interface_out)
   k_gl = 2
   k_st = 2
 
-  z_interface_out(1) = 0.
-  do k=2,GV%ke+1
-    if (k_st <= nk_st+1) then
-      if ( min(CS%stewart_z_interface(k_st),z_bottom) <= z_gl(k_gl)) then
-        z_interface_out(k) = min(CS%stewart_z_interface(k_st), z_bottom)
-        k_st = k_st + 1
+  if (CS%hybridize_stewart) then
+    z_interface_out(1) = 0.
+    do k=2,GV%ke+1
+      if (k_st <= nk_st+1) then
+        if ( min(CS%stewart_z_interface(k_st),z_bottom) <= z_gl(k_gl)) then
+          z_interface_out(k) = min(CS%stewart_z_interface(k_st), z_bottom)
+          k_st = k_st + 1
+        else
+          z_interface_out(k) = z_gl(k_gl)
+          k_gl = k_gl + 1
+        endif
       else
         z_interface_out(k) = z_gl(k_gl)
         k_gl = k_gl + 1
       endif
-    else
-      z_interface_out(k) = z_gl(k_gl)
-      k_gl = k_gl + 1
-    endif
-  enddo
+    enddo
+  endif
   ! Manual unit test
   !  st    gl
   !  [0    0]
