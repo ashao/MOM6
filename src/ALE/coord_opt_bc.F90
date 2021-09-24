@@ -38,14 +38,16 @@ type, public :: opt_bc_CS ; private
 
   real :: PI = 4.0*atan(1.0)
 
-  ! Stewart Z* grid parameters
-  logical :: hybridize_stewart !< If True, merge the Gauss-Lobatto grid with z* grid as described in
-                               !! Stewart et al. [Ocean Modelling, 2017]
+  ! Z-like grid parameters
+  logical :: hybridize_zlike !< If True, merge the Gauss-Lobatto grid with z* grid combining
+                               !! Stewart et al. [Ocean Modelling, 2017] in the surface boundary layer and
+                               !! uniform spacing below
   real :: stewart_min_dz       !< The minimum layer thickness used to calculate the Stewart grid
   real :: stewart_max_dz       !< The maximum layer thickness used to calculate the Stewart grid
   real :: stewart_S_h          !< The shape parameter for the vertical tanh function
   real :: stewart_H_max        !< The maximum estimated boundary layer depth of the ocean
   integer :: stewart_nk        !< The number of layers that are in the calculated Stewart grid
+  real :: below_sbl_dz         !< The uniform thickness used to create points below the surface boundary layer
   real, dimension(:), allocatable :: stewart_z_interface
 
 end type opt_bc_CS
@@ -54,7 +56,7 @@ public init_coord_opt_bc, set_opt_bc_params, build_opt_bc_column
 public adjust_opt_bc_surface
 public coord_opt_bc_unit_tests
 public end_coord_opt_bc
-public create_stewart_boundary_layer_grid, merge_opt_bc_stewart, initialize_stewart_grid
+public create_zlike_grid, merge_opt_bc_zlike, initialize_stewart_grid
 
 contains
 
@@ -87,7 +89,7 @@ subroutine initialize_stewart_grid( CS )
   real :: new_dz
   integer :: k
 
-  if (CS%hybridize_stewart) then
+  if (CS%hybridize_zlike) then
     ! Calculate the Stewart grid twice. Once to get the number of layers and the second to actually
     ! store the interface heights
     total_depth = 0.
@@ -121,18 +123,20 @@ end subroutine initialize_stewart_grid
 
 !> This subroutine can be used to set the parameters for the coord_opt_bc module
 subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method, &
-  hybridize_stewart, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max )
+  hybridize_zlike, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max, below_sbl_dz )
   type(opt_bc_CS),      pointer    :: CS !< Coordinate control structure
   real,    optional, intent(in) :: min_thickness !< Minimum allowed thickness [H ~> m or kg m-2]
   real,    optional, intent(in) :: min_N2 !< Minimum N2 allowed
   real,    optional, intent(in) :: max_N2 !< Maximum N2 allowed
   integer, optional, intent(in) :: sample_method !< The way to sample the 's' coordinate
-  logical, optional, intent(in) :: hybridize_stewart !< If True, merge the Gauss-Lobatto grid with z* grid as described in
+  logical, optional, intent(in) :: hybridize_zlike !< If True, merge the Gauss-Lobatto grid with z* grid as described in
                                    !! Stewart et al. [Ocean Modelling, 2017]
   real,    optional, intent(in) :: stewart_min_dz !< The minimum layer thickness used to calculate the Stewart grid
   real,    optional, intent(in) :: stewart_max_dz !< The maximum layer thickness used to calculate the Stewart grid
   real,    optional, intent(in) :: stewart_S_h    !< The shape parameter for the vertical tanh function
   real,    optional, intent(in) :: stewart_H_max  !< The maximum estimated boundary layer depth of the ocean
+  real,    optional, intent(in) :: below_sbl_dz !< Uniform spacing to create the zlike grid below the
+                                                !! surface boundary layer
 
   if (.not. associated(CS)) call MOM_error(FATAL, "set_opt_bc_params: CS not associated")
 
@@ -140,36 +144,70 @@ subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method, &
   if (present(min_N2)) CS%min_N2 = min_N2
   if (present(max_N2)) CS%max_N2 = max_N2
   if (present(sample_method)) CS%sample_method = sample_method
-  if( present(hybridize_stewart))  CS%hybridize_stewart = hybridize_stewart
-  if( present(stewart_min_dz))     CS%stewart_min_dz = stewart_min_dz
-  if( present(stewart_max_dz))     CS%stewart_max_dz = stewart_max_dz
-  if( present(stewart_S_h   ))     CS%stewart_S_h    = stewart_S_h
-  if( present(stewart_H_max ))     CS%stewart_H_max  = stewart_H_max
+  if( present(hybridize_zlike)) CS%hybridize_zlike = hybridize_zlike
+  if( present(stewart_min_dz))  CS%stewart_min_dz = stewart_min_dz
+  if( present(stewart_max_dz))  CS%stewart_max_dz = stewart_max_dz
+  if( present(stewart_S_h   ))  CS%stewart_S_h    = stewart_S_h
+  if( present(stewart_H_max ))  CS%stewart_H_max  = stewart_H_max
+  if( present(below_sbl_dz ))   CS%below_sbl_dz  = below_sbl_dz
 
 end subroutine set_opt_bc_params
 
-!> Set the interface heights based on the previously calculated Stewart grid that intersects the diagnosed boundary layer depth)
-subroutine create_stewart_boundary_layer_grid( CS, GV, boundary_layer_depth, nk_boundary_layer )
+!> Set the interface heights based on the previously calculated Stewart grid that intersects the diagnosed boundary layer depth with
+!! uniform spacing below.
+subroutine create_zlike_grid( CS, GV, boundary_layer_depth, bottom_depth, zlike_col, nk_zlike)
   type(opt_bc_CS),         intent(in)    :: CS !< coord_opt_bc control structure
   type(verticalGrid_type), intent(in)    :: GV !< Vertical grid structure
   real,                    intent(in)    :: boundary_layer_depth !< The depth of the boundary layer
-  integer,                 intent(  out) :: nk_boundary_layer
+  real,                    intent(in)    :: bottom_depth !< Depth of the bottom of the water column
+  real,dimension(GV%ke+1), intent(  out) :: zlike_col !< Interface depths on the new zlike grid
+  integer,                 intent(  out) :: nk_zlike  !< Number of valid depths in the new zlike grid
 
   real :: total_depth
-  integer :: k
+  integer :: k, k_above, k_below
+  logical :: in_boundary
 
-  if (CS%hybridize_stewart .and. allocated(CS%stewart_z_interface)) then
-    nk_boundary_layer = 0
-    do k=1,CS%stewart_nk+1
-      if (CS%stewart_z_interface(k) < boundary_layer_depth) then
-        nk_boundary_layer = nk_boundary_layer + 1
+
+  if (CS%hybridize_zlike.and. allocated(CS%stewart_z_interface)) then
+    !> First figure out how many points should follow the Stewart grid within the boundary layer
+    in_boundary = .false.
+    zlike_col(:) = 0.
+    nk_zlike = 0
+    do k_above=1,CS%stewart_nk
+      if (CS%stewart_z_interface(k_above) < boundary_layer_depth) then
+        nk_zlike = nk_zlike+1
+        zlike_col(k_above) = CS%stewart_z_interface(k_above)
+        in_boundary = .true.
       else
         exit
       endif
     enddo
+
+    if (.not. in_boundary) then
+      ! Case where no boundary layer and no points can be put in the grid because the column is shallower
+      ! than the minimum specified uniform grid
+      if (CS%below_sbl_dz >= bottom_depth) return
+      k_below = 2
+    else
+      k_below = k_above
+    endif
+
+    nk_zlike = k_below-1
+
+    ! Starting from the last point within the boundary, add interfaces at regular intervals until reaching the bottom
+    do while (zlike_col(k_below-1)+CS%below_sbl_dz < bottom_depth)
+      zlike_col(k_below) = zlike_col(k_below-1) + CS%below_sbl_dz
+      k_below = k_below+1
+      nk_zlike = nk_zlike+1
+    enddo
+
+    if (nk_zlike > GV%ke) call MOM_error(FATAL, &
+     "Construction of the z-like grid with the given parameters results in "//&
+     "too many layers. Increase OPT_BC_BELOW_SBL_DZ or adjust Stewart parameters")
+
   endif
 
-end subroutine create_stewart_boundary_layer_grid
+end subroutine create_zlike_grid
 
 !> Build a opt_bc coordinate column
 !!
@@ -273,33 +311,34 @@ subroutine build_opt_bc_column(CS, GV, nz, nk_boundary_layer, h, T, S, eta_orig,
 
 end subroutine build_opt_bc_column
 
-!> Merge the z*-like stewart grids with the previously computed Gauss-Lobatto grid
-subroutine merge_opt_bc_stewart( CS, GV, z_bottom, z_gl, nk_st, z_interface_out)
+!> Merge the z*-like grid with the previously computed Gauss-Lobatto grid
+subroutine merge_opt_bc_zlike( CS, GV, z_bottom, gl_col, zlike_col, nk_zlike, z_interface_out)
   type(opt_bc_CS),          intent(in) :: CS !< coord_opt_bc control structure
   type(verticalGrid_type),  intent(in) :: GV !< Vertical grid structure
   real,                     intent(in) :: z_bottom !< The depth of the column
-  real, dimension(CS%nk+1), intent(in) :: z_gl !< The interfaces from the Gauss-Lobatto grid
-  integer,                  intent(in) :: nk_st !< The number of layers of the Stewart grid within the boundary layer
-  real, dimension(GV%ke+1), intent(  out) :: z_interface_out !< The merged Stewart and Gauss-Lobatto grids
+  real, dimension(CS%nk+1), intent(in) :: gl_col !< The interfaces from the Gauss-Lobatto grid
+  real, dimension(CS%nk+1), intent(in) :: zlike_col !< The interfaces from the zlike grid
+  integer,                  intent(in) :: nk_zlike !< The number of layers of the zlike grid
+  real, dimension(GV%ke+1), intent(  out) :: z_interface_out !< The merged zlike and Gauss-Lobatto grids
 
-  integer :: k_gl, k_st, k
+  integer :: k_gl, k_zlike, k
 
   k_gl = 2
-  k_st = 2
+  k_zlike = 2
 
-  if (CS%hybridize_stewart) then
+  if (CS%hybridize_zlike) then
     z_interface_out(1) = 0.
     do k=2,GV%ke+1
-      if (k_st <= nk_st+1) then
-        if ( min(CS%stewart_z_interface(k_st),z_bottom) <= z_gl(k_gl)) then
-          z_interface_out(k) = min(CS%stewart_z_interface(k_st), z_bottom)
-          k_st = k_st + 1
+      if (k_zlike < nk_zlike+1) then
+        if ( min(zlike_col(k_zlike),z_bottom) <= gl_col(k_gl)) then
+          z_interface_out(k) = min(zlike_col(k_zlike), z_bottom)
+          k_zlike = k_zlike + 1
         else
-          z_interface_out(k) = z_gl(k_gl)
+          z_interface_out(k) = gl_col(k_gl)
           k_gl = k_gl + 1
         endif
       else
-        z_interface_out(k) = z_gl(k_gl)
+        z_interface_out(k) = gl_col(k_gl)
         k_gl = k_gl + 1
       endif
     enddo
@@ -330,7 +369,7 @@ subroutine merge_opt_bc_stewart( CS, GV, z_bottom, z_gl, nk_st, z_interface_out)
   !k_st = 5 k_gl = 6
   !z_interface(9) = 6
 
-end subroutine merge_opt_bc_stewart
+end subroutine merge_opt_bc_zlike
 
 !> Take care of the cases where the interpolated interfaces are less than the desired minimum thickness
 !! by linearly spacing interfaces at the top and bottom.

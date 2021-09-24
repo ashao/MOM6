@@ -32,7 +32,7 @@ use coord_slight, only : init_coord_slight, slight_CS, set_slight_params, build_
 use coord_adapt,  only : init_coord_adapt, adapt_CS, set_adapt_params, build_adapt_column, end_coord_adapt
 use coord_opt_bc, only : init_coord_opt_bc, opt_bc_CS, set_opt_bc_params
 use coord_opt_bc, only : build_opt_bc_column, end_coord_opt_bc
-use coord_opt_bc, only : OPT_BC_CHEBYSHEV, OPT_BC_COSINE, create_stewart_boundary_layer_grid, merge_opt_bc_stewart
+use coord_opt_bc, only : OPT_BC_CHEBYSHEV, OPT_BC_COSINE, create_zlike_grid, merge_opt_bc_zlike
 use coord_opt_bc, only : initialize_stewart_grid, adjust_opt_bc_surface
 
 implicit none ; private
@@ -208,7 +208,7 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
   real :: dz_fixed_sfc, Rho_avg_depth, nlay_sfc_int
   real :: adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha
   real :: adaptDrho0 ! Reference density difference for stratification-dependent diffusion. [R ~> kg m-3]
-  real :: opt_bc_min_n2, opt_bc_max_n2
+  real :: opt_bc_min_n2, opt_bc_max_n2, below_sbl_dz
   integer :: opt_bc_sample_method
   integer :: nz_fixed_sfc, k, nzf(4)
   real, dimension(:), allocatable :: dz     ! Resolution (thickness) in units of coordinate, which may be [m]
@@ -219,7 +219,7 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
   real, dimension(:), allocatable :: dz_max ! Thicknesses used to find maximum interface depths
                                             ! [H ~> m or kg m-2] or other units
   real, dimension(:), allocatable :: rho_target ! Target density used in HYBRID mode [kg m-3]
-  logical :: hybridize_stewart
+  logical :: hybridize_zlike
   real :: stewart_min_dz
   real :: stewart_max_dz
   real :: stewart_S_h
@@ -634,11 +634,12 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
       case ( "cosine" )
         opt_bc_sample_method = OPT_BC_COSINE
     end select
-    call get_param(param_file, mdl, "OPT_BC_HYBRIDIZE_STEWART", hybridize_stewart, &
-                  "If True, merge the Gauss-Lobatto grid with z* grid as described in\n"//&
-                  "Stewart et al. [Ocean Modelling, 2017]. This is primararily intended\n"//&
-                  "to avoid very thick layers within the boundary layer that the\n"//&
-                  "Gauss-Lobatto grid tends to create in regions with deep mixed layers.", &
+    call get_param(param_file, mdl, "OPT_BC_HYBRIDIZE_ZLIKE", hybridize_zlike, &
+                  "If True, merge the Gauss-Lobatto grid with z-like grid using \n"//&
+                  "Stewart et al. [Ocean Modelling, 2017] within the surface boundary layer \n"//&
+                  "and uniform spacing below. This is primararily intended\n"//&
+                  "to avoid very thick layers within the boundary layers that the\n"//&
+                  "Gauss-Lobatto grid tends to create.", &
                   default = .true.)
 
     call get_param(param_file, mdl, "OPT_BC_STEWART_MIN_DZ", stewart_min_dz, &
@@ -653,15 +654,22 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
     call get_param(param_file, mdl, "OPT_BC_STEWART_H_MAX", stewart_H_max, &
                    "The maximum estimated boundary layer depth of the ocean", &
                    default = 1000.)
+    call get_param(param_file, mdl, "OPT_BC_BELOW_SBL_DZ", below_sbl_dz, &
+                   "The uniform spacing used below the surface boundary layer \n"// &
+                   "to construct the z-like grid", &
+                   default = 250.)
 
     call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, &
                            opt_bc_sample_method = opt_bc_sample_method, &
-                           hybridize_stewart = hybridize_stewart, &
+                           hybridize_zlike = hybridize_zlike, &
                            stewart_min_dz    =    stewart_min_dz, &
                            stewart_max_dz    =    stewart_max_dz, &
                            stewart_S_h       =       stewart_S_h, &
-                           stewart_H_max     =    stewart_H_max)
-    if (hybridize_stewart) call initialize_stewart_grid(CS%opt_bc_CS)
+                           stewart_H_max     =    stewart_H_max,  &
+                           below_sbl_dz      =    below_sbl_dz)
+
+
+    if (hybridize_zlike) call initialize_stewart_grid(CS%opt_bc_CS)
      call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, opt_bc_max_n2 = opt_bc_max_n2, &
                             opt_bc_sample_method = opt_bc_sample_method)
 
@@ -1581,6 +1589,7 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
   real, dimension(CS%nk+1) ::    z_col_tmp ! Interface positions on the Gauss-Lobatto grid relative to the surface
                                            ! [H ~> m or kg m-2]
   real, dimension(CS%nk+1) ::    z_col_new ! New interface positions relative to the surface [H ~> m or kg m-2]
+  real, dimension(CS%nk+1) ::    zlike_col ! Interface positions of the z-like column
   real, dimension(SZK_(GV)+1) :: dz_col  ! The realized change in z_col [H ~> m or kg m-2]
   real, dimension(SZK_(GV))   :: p_col   ! Layer center pressure [Pa]
   real :: hscale, hscale_abs
@@ -1589,7 +1598,7 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
   real :: h_neglect, h_neglect_edge
   real :: z_top_col, totalThickness
   real :: boundary_layer_depth
-  integer :: nk_boundary_layer
+  integer :: nk_zlike
   logical :: ice_shelf
 
   nki = min(GV%ke, CS%nk)
@@ -1617,12 +1626,11 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
         z_col(K+1) = z_col(K) + h(i,j,k)
       enddo
 
-      ! TODO: Get the boundary layer depth
-      nk_boundary_layer = 0
-      call create_stewart_boundary_layer_grid( CS%opt_bc_CS, GV, hbl(i,j), nk_boundary_layer)
-      call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_boundary_layer, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
-                               z_col_tmp(1:CS%nk+1-nk_boundary_layer), tv%eqn_of_state)
-      call merge_opt_bc_stewart( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_tmp, nk_boundary_layer, z_col_new )
+      nk_zlike = 0
+      call create_zlike_grid( CS%opt_bc_CS, GV, hbl(i,j), z_col(GV%ke+1), zlike_col, nk_zlike )
+      call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_zlike-1, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
+                               z_col_tmp(1:CS%nk+1-nk_zlike+1), tv%eqn_of_state)
+      call merge_opt_bc_zlike( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_tmp, zlike_col, nk_zlike, z_col_new )
 
       ! Calculate the final change in grid position after blending new and old grids
       call filtered_grid_motion( CS, GV%ke, z_col, z_col_new, dz_col )
@@ -2403,7 +2411,7 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
              halocline_strat_tol, integrate_downward_for_e, remap_answers_2018, &
              adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha, adaptDoMin, adaptDrho0, &
              opt_bc_min_n2, opt_bc_max_n2, opt_bc_sample_method, &
-             hybridize_stewart, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max)
+             hybridize_zlike, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max, below_sbl_dz)
   type(regridding_CS), intent(inout) :: CS !< Regridding control structure
   logical, optional, intent(in) :: boundary_extrapolation !< Extrapolate in boundary cells
   real,    optional, intent(in) :: min_thickness    !< Minimum thickness allowed when building the
@@ -2447,12 +2455,13 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
   real,    optional, intent(in) :: opt_bc_max_n2    !< The minimum N2 allowed in the optimally sampled
                                                     !! baroclinic coordinate
   integer, optional, intent(in) :: opt_bc_sample_method !< The sampling method to use, either Chebyshev or cosine
-  logical, optional, intent(in) :: hybridize_stewart !< If True, merge the Gauss-Lobatto grid with z* grid as described in
-                                   !! Stewart et al. [Ocean Modelling, 2017]
+  logical, optional, intent(in) :: hybridize_zlike !< If True, merge the Gauss-Lobatto grid with z-like grid
   real,    optional, intent(in) :: stewart_min_dz !< The minimum layer thickness used to calculate the Stewart grid
   real,    optional, intent(in) :: stewart_max_dz !< The maximum layer thickness used to calculate the Stewart grid
   real,    optional, intent(in) :: stewart_S_h    !< The shape parameter for the vertical tanh function
   real,    optional, intent(in) :: stewart_H_max  !< The maximum estimated boundary layer depth of the ocean
+  real,    optional, intent(in) :: below_sbl_dz !< Uniform spacing to create the zlike grid below the
+                                                !! surface boundary layer
 
   if (present(interp_scheme)) call set_interp_scheme(CS%interp_CS, interp_scheme)
   if (present(boundary_extrapolation)) call set_interp_extrap(CS%interp_CS, boundary_extrapolation)
@@ -2516,11 +2525,12 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
     if (present(opt_bc_min_N2)) call set_opt_bc_params(CS%opt_bc_CS, min_N2 = opt_bc_min_N2)
     if (present(opt_bc_max_N2)) call set_opt_bc_params(CS%opt_bc_CS, max_N2 = opt_bc_max_N2)
     if (present(opt_bc_sample_method)) call set_opt_bc_params(CS%opt_bc_CS, sample_method = opt_bc_sample_method)
-    if( present(hybridize_stewart))  call set_opt_bc_params(CS%opt_bc_CS, hybridize_stewart = hybridize_stewart)
+    if( present(hybridize_zlike))  call set_opt_bc_params(CS%opt_bc_CS, hybridize_zlike = hybridize_zlike)
     if( present(stewart_min_dz))     call set_opt_bc_params(CS%opt_bc_CS, stewart_min_dz = stewart_min_dz)
     if( present(stewart_max_dz))     call set_opt_bc_params(CS%opt_bc_CS, stewart_max_dz = stewart_max_dz)
     if( present(stewart_S_h   ))     call set_opt_bc_params(CS%opt_bc_CS, stewart_S_h    = stewart_S_h)
     if( present(stewart_H_max ))     call set_opt_bc_params(CS%opt_bc_CS, stewart_H_max  = stewart_H_max)
+    if( present(below_sbl_dz ))     call set_opt_bc_params(CS%opt_bc_CS, below_sbl_dz  = below_sbl_dz)
   end select
 
 end subroutine set_regrid_params
