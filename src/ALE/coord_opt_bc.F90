@@ -88,6 +88,7 @@ subroutine initialize_stewart_grid( CS )
   real :: total_depth
   real :: new_dz
   integer :: k
+  character(len=255) :: msg
 
   if (CS%hybridize_zlike) then
     ! Calculate the Stewart grid twice. Once to get the number of layers and the second to actually
@@ -118,6 +119,10 @@ subroutine initialize_stewart_grid( CS )
      CS%stewart_z_interface(k+1) = total_depth
     end do
   endif
+
+  write(msg,*) TRIM("Number of Stewart grid points: "),CS%stewart_nk
+
+  call MOM_error(NOTE,msg)
 
 end subroutine initialize_stewart_grid
 
@@ -163,10 +168,13 @@ subroutine create_zlike_grid( CS, GV, boundary_layer_depth, bottom_depth, zlike_
   real,dimension(GV%ke+1), intent(  out) :: zlike_col !< Interface depths on the new zlike grid
   integer,                 intent(  out) :: nk_zlike  !< Number of valid depths in the new zlike grid
 
-  real :: total_depth
+  real :: total_depth, bld_local
   integer :: k, k_above, k_below
   logical :: in_boundary
 
+  ! Catch the case where there is no mixed layer depth
+  ! if (boundary_layer_depth == 0.) bld_local = CS%stewart_H_max
+  bld_local = min(CS%stewart_H_max, bottom_depth)
 
   if (CS%hybridize_zlike.and. allocated(CS%stewart_z_interface)) then
     !> First figure out how many points should follow the Stewart grid within the boundary layer
@@ -174,7 +182,7 @@ subroutine create_zlike_grid( CS, GV, boundary_layer_depth, bottom_depth, zlike_
     zlike_col(:) = 0.
     nk_zlike = 0
     do k_above=1,CS%stewart_nk
-      if (CS%stewart_z_interface(k_above) < boundary_layer_depth) then
+      if (CS%stewart_z_interface(k_above) < bld_local) then
         nk_zlike = nk_zlike+1
         zlike_col(k_above) = CS%stewart_z_interface(k_above)
         in_boundary = .true.
@@ -222,7 +230,7 @@ subroutine build_opt_bc_column(CS, GV, nz, nk_boundary_layer, h, T, S, eta_orig,
   real, dimension(nz), intent(in)    :: T  !< Temperature for source column [degC]
   real, dimension(nz), intent(in)    :: S  !< Salinity for source column [ppt]
   real, dimension(nz+1), intent(in)  :: eta_orig !< Absolute positions of interfaces
-  real, dimension(CS%nk-nk_boundary_layer+1), &
+  real, dimension(CS%nk+1), &
                        intent(inout) :: z_interface !< Absolute positions of interfaces
   type(EOS_type),      pointer       :: EOS !< Control structure for equation of state
 

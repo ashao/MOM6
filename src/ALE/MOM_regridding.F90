@@ -1629,7 +1629,7 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
       nk_zlike = 0
       call create_zlike_grid( CS%opt_bc_CS, GV, hbl(i,j), z_col(GV%ke+1), zlike_col, nk_zlike )
       call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_zlike-1, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
-                               z_col_tmp(1:CS%nk+1-nk_zlike+1), tv%eqn_of_state)
+                               z_col_tmp, tv%eqn_of_state)
       call merge_opt_bc_zlike( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_tmp, zlike_col, nk_zlike, z_col_new )
 
       ! Calculate the final change in grid position after blending new and old grids
