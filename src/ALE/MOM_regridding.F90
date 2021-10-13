@@ -634,43 +634,31 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
       case ( "cosine" )
         opt_bc_sample_method = OPT_BC_COSINE
     end select
-    call get_param(param_file, mdl, "OPT_BC_HYBRIDIZE_ZLIKE", hybridize_zlike, &
-                  "If True, merge the Gauss-Lobatto grid with z-like grid using \n"//&
-                  "Stewart et al. [Ocean Modelling, 2017] within the surface boundary layer \n"//&
-                  "and uniform spacing below. This is primararily intended\n"//&
-                  "to avoid very thick layers within the boundary layers that the\n"//&
-                  "Gauss-Lobatto grid tends to create.", &
-                  default = .true.)
+    call get_param(param_file, mdl, "OPT_BC_NK_OPT", nk_opt,
+                  "The number of layers to reserve for the creation of the \n"//&
+                  "Gauss-Lobato grid.", default = GV%ke)
+    call get_param(param_file, mdl, "OPT_BC_NK_REFINE", nk_refine,
+                  "The number of layers to reserve for the refinement of the \n"//&
+                  "Gauss-Lobato grid.", default = 0)
+    call get_param(param_file, mdl, "OPT_BC_NK_SURF", nk_surf,
+                  "The number of layers to reserve for the water column within \n"//&
+                  "the boundary layers", default = 0)
 
-    call get_param(param_file, mdl, "OPT_BC_STEWART_MIN_DZ", stewart_min_dz, &
-                  "The minimum layer thickness used to calculate the Stewart grid", &
-                  default = 1.)
-    call get_param(param_file, mdl, "OPT_BC_STEWART_MAX_DZ", stewart_max_dz, &
-                  "The maximum layer thickness used to calculate the Stewart grid", &
-                  default = 10.)
-    call get_param(param_file, mdl, "OPT_BC_STEWART_S_H", stewart_S_h , &
-                   "The shape parameter for the vertical tanh function", &
-                   default = 0.8)
-    call get_param(param_file, mdl, "OPT_BC_STEWART_H_MAX", stewart_H_max, &
-                   "The maximum estimated boundary layer depth of the ocean", &
-                   default = 1000.)
-    call get_param(param_file, mdl, "OPT_BC_BELOW_SBL_DZ", below_sbl_dz, &
-                   "The uniform spacing used below the surface boundary layer \n"// &
-                   "to construct the z-like grid", &
-                   default = 250.)
+    if (nk_opt+nk_refine+nk_surf /= GV%ke) then
+      call MOM_error(FATAL, &
+        "When using the Gauss-Lobato grid, OPT_BC_NK_OPT + OPT_BC_NK_REFINE + OPT_BC_NK_SURF must equal NK")
+    endif
 
     call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, &
+                           opt_bc_max_n2 = opt_bc_max_n2, &
                            opt_bc_sample_method = opt_bc_sample_method, &
-                           hybridize_zlike = hybridize_zlike, &
-                           stewart_min_dz    =    stewart_min_dz, &
-                           stewart_max_dz    =    stewart_max_dz, &
-                           stewart_S_h       =       stewart_S_h, &
-                           stewart_H_max     =    stewart_H_max,  &
-                           below_sbl_dz      =    below_sbl_dz)
+                           nk_opt = nk_opt,
+                           nk_refine = nk_refine,
+                           nk_surf = nk_surf)
 
 
-    if (hybridize_zlike) call initialize_stewart_grid(CS%opt_bc_CS)
-     call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, opt_bc_max_n2 = opt_bc_max_n2, &
+     call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2,
+     opt_bc_max_n2 = opt_bc_max_n2, &
                             opt_bc_sample_method = opt_bc_sample_method)
 
   endif
