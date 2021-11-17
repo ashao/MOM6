@@ -12,14 +12,18 @@ use regrid_interp,     only : interp_CS_type, build_and_interpolate_grid, DEGREE
 
 implicit none ; private
 
-integer, parameter, public :: OPT_BC_CHEBYSHEV = 1 !< A faux-enum for selecting a sampling method based on Chebyshev polynomials
-integer, parameter, public :: OPT_BC_COSINE = 2    !< A faux-enum for selecting a sampling method based on a cosine function
+#include <MOM_memory.h>
+integer, parameter, public :: OPT_BC_CHEBYSHEV = 1 !< A faux-enum for selecting a sampling method based on
+                                                   !! Chebyshev polynomials
+integer, parameter, public :: OPT_BC_COSINE = 2    !< A faux-enum for selecting a sampling method based on
+                                                   !! a cosine function
 
 !> Control structure containing required parameters for the opt_bc coordinate
-type, public :: opt_bc_CS ; private
+type, public :: opt_bc_CS ; !private
 
   !> Number of layers
-  integer :: nk
+  integer :: nk !< Number of total layers in the grid
+  integer :: nk_gl !< Number of points in the Gauss-Lobato grid
 
   !> Minimum thickness allowed for layers, often in [H ~> m or kg m-2]
   real :: min_thickness = 0.
@@ -38,25 +42,17 @@ type, public :: opt_bc_CS ; private
 
   real :: PI = 4.0*atan(1.0)
 
-  ! Z-like grid parameters
-  logical :: hybridize_zlike !< If True, merge the Gauss-Lobatto grid with z* grid combining
-                               !! Stewart et al. [Ocean Modelling, 2017] in the surface boundary layer and
-                               !! uniform spacing below
-  real :: stewart_min_dz       !< The minimum layer thickness used to calculate the Stewart grid
-  real :: stewart_max_dz       !< The maximum layer thickness used to calculate the Stewart grid
-  real :: stewart_S_h          !< The shape parameter for the vertical tanh function
-  real :: stewart_H_max        !< The maximum estimated boundary layer depth of the ocean
-  integer :: stewart_nk        !< The number of layers that are in the calculated Stewart grid
-  real :: below_sbl_dz         !< The uniform thickness used to create points below the surface boundary layer
-  real, dimension(:), allocatable :: stewart_z_interface
+  real :: BL_thickness_ratio !< The ratio used in the geometric series used to set z-like surfaces
+                              !! within the boundary layer
+  real :: max_top_thickness !< The maximum thickness for the surface layer
+
 
 end type opt_bc_CS
 
 public init_coord_opt_bc, set_opt_bc_params, build_opt_bc_column
-public adjust_opt_bc_surface
-public coord_opt_bc_unit_tests
+public create_sbl_grid, refine_opt_bc_column, concatenate_gl_bl !, refine_surf_opt_bc_column
+public coord_opt_bc_unit_tests, adjust_for_neighboring_bathy
 public end_coord_opt_bc
-public create_zlike_grid, merge_opt_bc_zlike, initialize_stewart_grid
 
 contains
 
@@ -71,7 +67,6 @@ subroutine init_coord_opt_bc(CS, nk)
 
   CS%nk = nk
 
-
 end subroutine init_coord_opt_bc
 
 !> This subroutine deallocates memory in the control structure for the coord_opt_bc module
@@ -83,65 +78,17 @@ subroutine end_coord_opt_bc(CS)
   deallocate(CS)
 end subroutine end_coord_opt_bc
 
-subroutine initialize_stewart_grid( CS )
-  type(opt_bc_CS),         pointer    :: CS !< Unassociated pointer to hold the control structure
-  real :: total_depth
-  real :: new_dz
-  integer :: k
-  character(len=255) :: msg
-
-  if (CS%hybridize_zlike) then
-    ! Calculate the Stewart grid twice. Once to get the number of layers and the second to actually
-    ! store the interface heights
-    total_depth = 0.
-    CS%stewart_nk = 0
-
-    do while ( total_depth < CS%stewart_H_max )
-     new_dz = CS%stewart_max_dz*TANH(CS%PI*total_depth/(CS%stewart_S_h*CS%stewart_H_max)) + CS%stewart_min_dz
-     total_depth = total_depth + new_dz
-     CS%stewart_nk = CS%stewart_nk + 1
-    end do
-
-    if (CS%stewart_nk > CS%nk) call MOM_error(FATAL, &
-      "The number of layers needed to accommodate the Stewart grid is larger\n"//&
-      "than the number of vertical levels. Increase NK or modify parameters of\n"//&
-      "the Stewart grid")
-
-    ! Allocate the required size of array
-    allocate(CS%stewart_z_interface(CS%stewart_nk+1))
-    CS%stewart_z_interface(1) = 0.
-
-    ! Calculate the Stewart grid again and now store the interface heights
-    total_depth = 0.
-    do k = 1,CS%stewart_nk
-     new_dz = CS%stewart_max_dz*TANH(CS%PI*total_depth/(CS%stewart_S_h*CS%stewart_H_max)) + CS%stewart_min_dz
-     total_depth = total_depth + new_dz
-     CS%stewart_z_interface(k+1) = total_depth
-    end do
-  endif
-
-  write(msg,*) TRIM("Number of Stewart grid points: "),CS%stewart_nk
-
-  call MOM_error(NOTE,msg)
-
-end subroutine initialize_stewart_grid
-
 !> This subroutine can be used to set the parameters for the coord_opt_bc module
 subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method, &
-  hybridize_zlike, stewart_min_dz, stewart_max_dz, stewart_S_h, stewart_H_max, below_sbl_dz )
+    nk_gl, bl_thickness_ratio, max_top_thickness )
   type(opt_bc_CS),      pointer    :: CS !< Coordinate control structure
   real,    optional, intent(in) :: min_thickness !< Minimum allowed thickness [H ~> m or kg m-2]
   real,    optional, intent(in) :: min_N2 !< Minimum N2 allowed
   real,    optional, intent(in) :: max_N2 !< Maximum N2 allowed
   integer, optional, intent(in) :: sample_method !< The way to sample the 's' coordinate
-  logical, optional, intent(in) :: hybridize_zlike !< If True, merge the Gauss-Lobatto grid with z* grid as described in
-                                   !! Stewart et al. [Ocean Modelling, 2017]
-  real,    optional, intent(in) :: stewart_min_dz !< The minimum layer thickness used to calculate the Stewart grid
-  real,    optional, intent(in) :: stewart_max_dz !< The maximum layer thickness used to calculate the Stewart grid
-  real,    optional, intent(in) :: stewart_S_h    !< The shape parameter for the vertical tanh function
-  real,    optional, intent(in) :: stewart_H_max  !< The maximum estimated boundary layer depth of the ocean
-  real,    optional, intent(in) :: below_sbl_dz !< Uniform spacing to create the zlike grid below the
-                                                !! surface boundary layer
+  integer, optional, intent(in) :: nk_gl !< The number of points used in the gauss-lobato grid
+  real,    optional, intent(in) :: bl_thickness_ratio !< The ratio used in a geometric progression within the surface
+  real,    optional, intent(in) :: max_top_thickness !<  The maximum thickness of the surface layer
 
   if (.not. associated(CS)) call MOM_error(FATAL, "set_opt_bc_params: CS not associated")
 
@@ -149,12 +96,9 @@ subroutine set_opt_bc_params(CS, min_thickness, min_N2, max_N2, sample_method, &
   if (present(min_N2)) CS%min_N2 = min_N2
   if (present(max_N2)) CS%max_N2 = max_N2
   if (present(sample_method)) CS%sample_method = sample_method
-  if( present(hybridize_zlike)) CS%hybridize_zlike = hybridize_zlike
-  if( present(stewart_min_dz))  CS%stewart_min_dz = stewart_min_dz
-  if( present(stewart_max_dz))  CS%stewart_max_dz = stewart_max_dz
-  if( present(stewart_S_h   ))  CS%stewart_S_h    = stewart_S_h
-  if( present(stewart_H_max ))  CS%stewart_H_max  = stewart_H_max
-  if( present(below_sbl_dz ))   CS%below_sbl_dz  = below_sbl_dz
+  if (present(bl_thickness_ratio)) CS%bl_thickness_ratio = bl_thickness_ratio
+  if (present(nk_gl)) CS%nk_gl = nk_gl
+  if (present(max_top_thickness)) CS%max_top_thickness = max_top_thickness
 
 end subroutine set_opt_bc_params
 
@@ -170,7 +114,7 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
   real, dimension(nz), intent(in)    :: T  !< Temperature for source column [degC]
   real, dimension(nz), intent(in)    :: S  !< Salinity for source column [ppt]
   real, dimension(nz+1), intent(in)  :: eta_orig !< Absolute positions of interfaces
-  real, dimension(CS%nk_opt+1), &
+  real, dimension(CS%nk_gl+1), &
                        intent(inout) :: z_interface !< Absolute positions of interfaces
   type(EOS_type),      pointer       :: EOS !< Control structure for equation of state
 
@@ -182,9 +126,9 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
   real, dimension(nz+1) :: drho_dT, drho_dS ! Derivatives of density
   real, dimension(nz+1) :: N2, N
   real, dimension(nz+1) :: s_unscaled
-  real, dimension(CS%nk_opt+1) :: s_scaled
+  real, dimension(CS%nk_gl+1) :: s_scaled
   real, dimension(nz+1) :: I_dz_int
-  real, dimension(CS%nk_opt) :: h_new ! New thicknesses [H ~> m or kg m-2]
+  real, dimension(CS%nk_gl) :: h_new ! New thicknesses [H ~> m or kg m-2]
   real :: I_nk
 
 
@@ -225,7 +169,8 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
 
   N(1) = SQRT(CS%min_N2) ; N(nz+1) = SQRT(CS%min_N2)
   do K=2,nz
-    N(k) = SQRT(MAX((CS%min_N2), (GV%g_Earth/GV%Rho0)*(-I_dz_int(K) * (drho_dT(K) * (T(k-1)-T(k)) + drho_dS(K) * (S(k-1)-S(k))))))
+    N(k) = SQRT(MAX((CS%min_N2), (GV%g_Earth/GV%Rho0)*(-I_dz_int(K) * (drho_dT(K) * (T(k-1)-T(k)) + &
+                                                                       drho_dS(K) * (S(k-1)-S(k))))))
     N(k) = MIN(N(k), SQRT(CS%max_N2))
   enddo
 
@@ -236,52 +181,139 @@ subroutine build_opt_bc_column(CS, GV, nz, h, T, S, eta_orig, z_interface, EOS)
   enddo
 
   range_s = MAXVAL(s_unscaled(1:nz))
-  I_nk = 1./(CS%nk_opt)
+  I_nk = 1./(CS%nk_gl)
 
   ! Gauss-Lobatto grid
   select case (CS%sample_method)
     case(OPT_BC_COSINE)
       kidx = 0
-      do k=CS%nk_opt,0,-1
+      do k=CS%nk_gl,0,-1
         kidx = kidx + 1
         s_scaled(kidx) = range_s*(k*I_nk)
       enddo
     case(OPT_BC_CHEBYSHEV)
-      do K=0,CS%nk_opt-nk_boundary_layer
+      do K=0,CS%nk_gl
         s_scaled(k+1) = (0.5*range_s)*(cos( CS%pi*(K*I_nk)) + 1)
       enddo
   end select
 
   ! Interpolate from eta on the scaled grid back to eta on the s-grid
   z_interface(:) = interp_linear( s_unscaled, eta_orig, s_scaled )
-  z_interface(CS%nk_opt+1) = eta_orig(nz+1)
+  z_interface(CS%nk_gl+1) = eta_orig(nz+1)
   z_interface(1) = eta_orig(1)
 
 end subroutine build_opt_bc_column
 
+!> In the near surface layer, ensure that there is sufficient resolution so that
+!! it roughly matches the resolution of the grid in shallow regions of the ocean
+!! 1. Find the first interface deeper than min_bathy
+!! 2. Only refine layers above that interface up to a maximum of nk_refine
+!! until layers are no thicker than max_refine_sbl
+!! 3. Any remaining layers can be used to refine deeper points
+!subroutine refine_surf_opt_bc_column( CS, GV, z_in, nk_in, min_bathy, max_h, z_refined, nk_new )
+!  type(opt_bc_CS),             intent(in) :: CS    !< coord_opt_bc control structure
+!  type(verticalGrid_type),     intent(in) :: GV    !< Vertical grid structure
+!  real, dimension(SZK_(GV)+1), intent(in) :: z_in  !< The interface locations on the original GL+SBL grid
+!  integer,                     intent(in) :: nk_in !< The number of set vertical levels
+!  real,                        intent(in) :: min_bathy !< The shallowest water column within the vicinity
+!                                                       ! of the current one
+!  real,                        intent(in) :: max_h     !< The maximum thickness that a layer should be refined to
+!  real, dimension(SZK_(GV)+1), intent(  out) :: z_refined !< The interface locations on the original Chebyshev grid
+!  integer,                     intent(  out) :: nk_new !< Number of interfaces set after this routine
+!
+!  integer :: k, k_deep, k_start_refined, nk_remain
+!
+!  do k=1,nk_in
+!    if (z_in(k) >= min_bathy) then
+!      k_deep = k
+!      exit
+!    endif
+!  enddo
+!
+!  call refine_opt_bc_column(CS, GV, z_in, k_deep, z_refined, max_h, nk_new)
+! 
+!  k_start_refined = k_deep+nk_new+1
+!  nk_remain = nk_in - k_deep
+!
+!  if (k_start_refined > 51 .or. k_start_refined+nk_remain-1 > 51) then
+!    call MOM_error(FATAL, "OOPS")
+!  endif
+!
+!  z_refined(k_start_refined:k_start_refined+nk_remain-1) = z_in(k_deep+1:nk_in)
+!  nk_new = nk_in + nk_new
+!
+!!  z_in = 0
+!!         1
+!!         2
+!!         3
+!!         4
+!!         5
+!!         -9999
+!!         -9999
+!!         -9999
+!!         -9999
+!!         -9999
+!!
+!!  k_deep = 3
+!!
+!!  z_refined = 0
+!!              0.5
+!!              1.
+!!              1.5
+!!              2
+!!  nk_new = 2
+!!
+!!  k_start_refined = 3+2+1
+!!  nk_remain = 6-3 = 3
+!!
+!!  z_refined(6:6+3-1) = z_in(4:6)
+!!
+!!  z_refined (2) = 0
+!!                  0.5
+!!                  1.
+!!                  1.5
+!!                  2
+!!                  3
+!!                  4
+!!                  5
+!!                  -9999
+!!                  -9999
+!!                  -9999
+!!                  -9999
+!
+!end subroutine refine_surf_opt_bc_column
+
 !> Sweep through the column and add additional interfaces in the midpoints of the thickest cells
-subroutine refine_opt_bc_column(CS, z_opt, z_opt_refined)
-  type(opt_bc_CS),                    intent(in) :: CS !< coord_opt_bc control structure
-  real, dimension(CS%nk_opt+1), intent(in) :: z_opt !< The interface locations on the original GL grid
-  real, dimension(CS%nk_opt+CS%nk_refine+1), intent(in) :: z_opt_refined !< The interface locations on the
-                                                                         !! original Chebyshev grid
+subroutine refine_opt_bc_column(CS, GV, z_in, nk_in, z_refined, max_h, nk_new)
+  type(opt_bc_CS),             intent(in) :: CS    !< coord_opt_bc control structure
+  type(verticalGrid_type),     intent(in) :: GV    !< Vertical grid structure
+  real, dimension(SZK_(GV)+1), intent(in) :: z_in  !< The interface locations on the original GL grid
+  integer,                     intent(in) :: nk_in !< The number of set vertical levels
+  real, dimension(SZK_(GV)+1), intent(  out) :: z_refined !< The interface locations on the original Chebyshev grid
+  real, optional,              intent(in) :: max_h !< The maximum thickness that  a layer should be refined to
+  integer, optional,           intent(  out) :: nk_new!< The number of new layers created in this subroutine
 
-  integer :: k, km, ktot
-  real, dimension(CS%nk_opt+CS%nk_refine) :: h_new, h_old
-  real :: hmax
+  integer :: k, km, ktot, nk_refine, kmax
+  real, dimension(SZK_(GV)) :: h_new, h_old
 
-  ktot = CS%nk_opt + CS%nk_refine
+  nk_refine = (GV%ke+1) - nk_in
 
   ! Calculate thicknesses on original grid
   h_old(:) = 0.
-  do k=1,CS%nk_opt
-    h_old(k) = z_opt(k+1)-z_opt(k)
+  h_new(:) = 0.
+  do k=1,nk_in-1
+    h_old(k) = z_in(k+1)-z_in(k)
   enddo
+
+  if (PRESENT(nk_new)) nk_new= 0
 
   ! Go through and shrink the largest layers by 1/2. This is done iteratively instead of in one sweep to
   ! try to maintain a smoother distribution of layer thicknesses
-  do k=1,CS%nk_refine
+  do k=1,nk_refine
     kmax = MAXLOC(h_old,1)
+    if (PRESENT(max_h) ) then
+      if ( h_old(kmax) < max_h ) exit
+    endif
     do km=1,kmax-1
       h_new(km) = h_old(km)
     enddo
@@ -291,52 +323,58 @@ subroutine refine_opt_bc_column(CS, z_opt, z_opt_refined)
     h_new(kmax+1) = h_new(kmax)
 
     ! Fill in all the remaining thicknesses
-    do km=kmax+2,CS%nk_opt+k
+    do km=kmax+2,nk_in+k-1
       h_new(km) = h_old(km-1)
     enddo
 
-    do km=1,ktot
+    do km=1,nk_in+k-1
       h_old(km) = h_new(km)
     enddo
+    if (PRESENT(nk_new)) nk_new= nk_new + 1
   enddo
 
   ! Calculated the interface depths of the refined grid
-  z_opt_refined(1) = z_opt(1)
-  do k=2,ktot
-    z_opt_refined(k) = z_opt_refined(k-1)+hnew(k)
+  z_refined(1) = z_in(1)
+  do k=2,GV%ke
+    z_refined(k) = z_refined(k-1)+h_old(k)
   enddo
-  z_opt_refined(ktot+1) = z_opt(CS%nk_opt+1)
+  z_refined(GV%ke+1) = z_in(nk_in)
 
 end subroutine refine_opt_bc_column
 
 !> Create a z-like grid within the boundary layer
-subroutine create_sbl_grid( CS, GV, sbl_depth, z_gl, z_bl, nk_BL)
+subroutine create_sbl_grid( CS, GV, h_sbl, z_gl, bathyT, z_sbl, nk_sbl)
   type(opt_bc_CS),          intent(in)    :: CS    !< coord_opt_bc control structure
   type(verticalGrid_type),  intent(in)    :: GV    !< Vertical grid structure
   real,                     intent(in)    :: h_sbl !< Thickness of the surface boundary layer
-  real, dimension(GV%ke+1)  intent(in)    :: z_gl   !< Interface depths on the Gauss-Lobatto grid
-  real, dimension(GV%ke+1), intent(  out) :: z_sbl   !< Interface depths within the surface boundary layer
+  real, dimension(SZK_(GV)+1), intent(in)    :: z_gl   !< Interface depths on the Gauss-Lobatto grid
+  real,                     intent(in)    :: bathyT !< Bottom depth of the column
+  real, dimension(SZK_(GV)+1), intent(  out) :: z_sbl   !< Interface depths within the surface boundary layer
   integer,                  intent(  out) :: nk_sbl  !< Number of valid depths in the boundary layer grid
 
   integer :: k, K_gl
   real :: n, top_dz, first_gl_depth
 
-  z_bl(:) = 0.
+  z_sbl(:) = 0.
 
   ! When there is no boundary layer depth (i.e. upon initialization), the Chebyshev routine will keep all points up
   ! to z = 0 and first_cheby_depth will equal 0. Then the remaining points will be added inside of layers that are
   ! too thick. So this routine will not need to do anything or count any points as being in the BL.
-  if (h_sbl == 0.) then
-    nk_BL = 0
-    return
+  if (bathyT < 1000.) then
+    first_gl_depth = bathyT
   else
-    K=0
-    do while (z_gl(K+1) < h_sbl)
-      K = K+1
-      K_gl = K
-    enddo
-  endif
-  first_gl_depth = z_gl(k_sbl)
+    if (h_sbl == 0.) then
+      nk_sbl = 0
+      return
+    else
+      K=0
+      do while (z_gl(K+1) < h_sbl)
+        K = K+1
+        K_gl = K
+      enddo
+    endif
+    first_gl_depth = z_gl(K_gl+1)
+  endif 
 
   ! Figure out how many points we will need
   ! The sum of the n layer thicknesses will equal first_cheby_depth
@@ -345,17 +383,67 @@ subroutine create_sbl_grid( CS, GV, sbl_depth, z_gl, z_bl, nk_BL)
   ! If nk_BL indicates the number of interfaces then I think we should take the ceiling of n to make it an integer.
   ! The first point of BL_col will be zero. I will define nk_BL such that the (nk_BL+1)th point will be equal to first_cheby_depth.
   ! Then we should be able to take the nk_BL points and add them to the Cheby points without having to worry about double-counting.
-  nk_BL = CEILING(n)
+  nk_sbl = MAX(CEILING(n),2)
 
-  ! Now that we know nk_BL we can go back and recalculate the first layer thickness so that the last BL_col interface
-  ! lands exactly on first_cheby_depth
-  top_dz = first_gl_depth * (1 - CS%BL_thickness_ratio**n) / (1-CS%BL_thickness_ratio)
+  if (nk_sbl>0) then
+    ! Now that we know nk_BL we can go back and recalculate the first layer thickness so that the last BL_col interface
+    ! lands exactly on first_cheby_depth
+    top_dz = first_gl_depth * (1 - CS%BL_thickness_ratio) / (1-CS%BL_thickness_ratio**nk_sbl)
 
-  do k=2,nk_BL
-      z_bl(k) = z_bl(k-1) + top_dz * CS%BL_thickness_ratio**(k-2)
+    do k=2,nk_sbl
+        z_sbl(k) = z_sbl(k-1) + top_dz * CS%BL_thickness_ratio**(k-2)
+    enddo
+  endif
+
+end subroutine create_sbl_grid
+
+!> Concatenate the boundary layer grids and the Gauss-Lobatto grids
+subroutine concatenate_gl_bl( CS, GV, z_gl, z_sbl, nk_sbl, z_out, nk_out )
+  type(opt_bc_CS),             intent(in)    :: CS     !< coord_opt_bc control structure
+  type(verticalGrid_type),     intent(in)    :: GV     !< Vertical grid structure
+  real, dimension(SZK_(GV)+1), intent(in)    :: z_gl   !< Interface depths on the Gauss-Lobatto grid
+  real, dimension(SZK_(GV)+1), intent(in)    :: z_sbl  !< Interface depths within the surface boundary layer
+  integer,                     intent(in)    :: nk_sbl !< Number of valid depths in the boundary layer grid
+  real, dimension(SZK_(GV)+1), intent(  out) :: z_out  !< Interface depths within the surface boundary layer
+  integer,                     intent(  out) :: nk_out !< Number of interface depths set after concatenation
+
+  integer :: k
+
+  do k=1,nk_sbl
+    z_out(k) = z_sbl(k)
+  enddo
+  nk_out=nk_sbl
+  do k=1,CS%nk_gl+1
+    if (z_gl(k) >= MAXVAL(z_sbl)) then
+      nk_out = nk_out + 1
+      z_out(nk_out) = z_gl(k)
+    endif
   enddo
 
-end subroutine create_BL_grid
+end subroutine concatenate_gl_bl
+
+!> Loop through and adjust the grid so that no layers shallower than min_bathy are too thick.
+!! This will help to minimize spurious pressure gradients from having adjacent columns with
+!! wildly different layer thicknesses.
+subroutine adjust_for_neighboring_bathy( CS, GV, z_in, min_bathy, max_h)
+  type(opt_bc_CS),             intent(in) :: CS    !< coord_opt_bc control structure
+  type(verticalGrid_type),     intent(in) :: GV    !< Vertical grid structure
+  real, dimension(SZK_(GV)+1), intent(inout) :: z_in  !< The interface locations on the refined GL+SBL grid
+  real,                        intent(in) :: min_bathy !< The shallowest water column within the vicinity
+                                                       ! of the current one
+  real,                        intent(in) :: max_h     !< The maximum thickness that a layer should be refined to
+  integer :: k
+
+  do k=1,GV%ke-1
+    if ((z_in(k+1) - z_in(k)) > max_h ) then
+      z_in(k+1) = z_in(k) + max_h
+    endif
+    if (z_in(k+1) >= min_bathy) then
+      exit
+    endif
+  enddo
+
+end subroutine adjust_for_neighboring_bathy
 
 !> Perform simple tests of the opt_bc/cosine scaled coordinates
 function coord_opt_bc_unit_tests( verbose ) result( failed )
@@ -389,14 +477,14 @@ function coord_opt_bc_unit_tests( verbose ) result( failed )
   eta_orig(:) = [0., 1., 2., 3., 4.]
   eta_expected(:) = [0., 1.25, 2., 2.75, 4.]
 
-  call build_opt_bc_column( CS, GV, nk, 0, h, temp, salt, eta_orig, eta_new, EOS)
+  call build_opt_bc_column( CS, GV, nk, h, temp, salt, eta_orig, eta_new, EOS)
   failed = any( ABS(eta_orig - eta_expected) > 5.e-3 )
   if (failed) call MOM_error( NOTE, "FAILED: coord_opt_bc N2 = 1, cosine basis" )
 
   ! Test 2: N2 = 1, chebyshev basis
   CS%sample_method = OPT_BC_CHEBYSHEV
   eta_expected = [0., 0.8786738, 2., 3.121326, 4.]
-  call build_opt_bc_column( CS, GV, nk, 0, h, temp, salt, eta_orig, eta_new, EOS)
+  call build_opt_bc_column( CS, GV, nk, h, temp, salt, eta_orig, eta_new, EOS)
   failed = any( ABS(eta_orig - eta_expected) > 5.e-3 )
   if (failed) call MOM_error( NOTE, "FAILED: coord_opt_bc N2 = 1, Chebyshev basis" )
 

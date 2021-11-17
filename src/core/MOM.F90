@@ -317,6 +317,8 @@ type, public :: MOM_control_struct ; private
   logical :: answers_2018       !< If true, use expressions for the surface properties that recover
                                 !! the answers from the end of 2018. Otherwise, use more appropriate
                                 !! expressions that differ at roundoff for non-Boussinsq cases.
+  integer :: thermo_calls
+  integer :: ALE_interval
 
   type(MOM_diag_IDs)       :: IDs      !<  Handles used for diagnostics.
   type(transport_diag_IDs) :: transport_IDs  !< Handles used for transport diagnostics.
@@ -1320,38 +1322,43 @@ subroutine step_MOM_thermo(CS, G, GV, US, u, v, h, tv, fluxes, dtdia, &
     ! Regridding/remapping is done here, at end of thermodynamics time step
     ! (that may comprise several dynamical time steps)
     ! The routine 'ALE_main' can be found in 'MOM_ALE.F90'.
-    if ( CS%use_ALE_algorithm ) then
-      call enable_averages(dtdia, Time_end_thermo, CS%diag)
-!         call pass_vector(u, v, G%Domain)
-      call cpu_clock_begin(id_clock_pass)
-      if (associated(tv%T)) &
-        call create_group_pass(pass_T_S_h, tv%T, G%Domain, To_All+Omit_Corners, halo=1)
-      if (associated(tv%S)) &
-        call create_group_pass(pass_T_S_h, tv%S, G%Domain, To_All+Omit_Corners, halo=1)
-      call create_group_pass(pass_T_S_h, h, G%Domain, To_All+Omit_Corners, halo=1)
-      call do_group_pass(pass_T_S_h, G%Domain)
-      call cpu_clock_end(id_clock_pass)
 
-      call preAle_tracer_diagnostics(CS%tracer_Reg, G, GV)
+    CS%thermo_calls = CS%thermo_calls + 1
+    if ( MOD(CS%thermo_calls, CS%ALE_interval) == 0 ) then
+      CS%thermo_calls = 0
+      if ( CS%use_ALE_algorithm ) then
+        call enable_averages(dtdia, Time_end_thermo, CS%diag)
+  !         call pass_vector(u, v, G%Domain)
+        call cpu_clock_begin(id_clock_pass)
+        if (associated(tv%T)) &
+          call create_group_pass(pass_T_S_h, tv%T, G%Domain, To_All+Omit_Corners, halo=1)
+        if (associated(tv%S)) &
+          call create_group_pass(pass_T_S_h, tv%S, G%Domain, To_All+Omit_Corners, halo=1)
+        call create_group_pass(pass_T_S_h, h, G%Domain, To_All+Omit_Corners, halo=1)
+        call do_group_pass(pass_T_S_h, G%Domain)
+        call cpu_clock_end(id_clock_pass)
 
-      if (CS%debug) then
-        call MOM_state_chksum("Pre-ALE ", u, v, h, CS%uh, CS%vh, G, GV, US)
-        call hchksum(tv%T,"Pre-ALE T", G%HI, haloshift=1)
-        call hchksum(tv%S,"Pre-ALE S", G%HI, haloshift=1)
-        call check_redundant("Pre-ALE ", u, v, G)
-      endif
-      call cpu_clock_begin(id_clock_ALE)
-      if (use_ice_shelf) then
-        call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
-                      ePBL_CSp, KPP_CSp, dtdia, CS%frac_shelf_h)
-      else
-        call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
-                      ePBL_CSp, KPP_CSp, dtdia)
-      endif
+        call preAle_tracer_diagnostics(CS%tracer_Reg, G, GV)
 
-      if (showCallTree) call callTree_waypoint("finished ALE_main (step_MOM_thermo)")
-      call cpu_clock_end(id_clock_ALE)
-    endif   ! endif for the block "if ( CS%use_ALE_algorithm )"
+        if (CS%debug) then
+          call MOM_state_chksum("Pre-ALE ", u, v, h, CS%uh, CS%vh, G, GV, US)
+          call hchksum(tv%T,"Pre-ALE T", G%HI, haloshift=1)
+          call hchksum(tv%S,"Pre-ALE S", G%HI, haloshift=1)
+          call check_redundant("Pre-ALE ", u, v, G)
+        endif
+        call cpu_clock_begin(id_clock_ALE)
+        if (use_ice_shelf) then
+          call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
+                        ePBL_CSp, KPP_CSp, dtdia, CS%frac_shelf_h)
+        else
+          call ALE_main(G, GV, US, h, u, v, tv, CS%tracer_Reg, CS%ALE_CSp, CS%OBC, &
+                        ePBL_CSp, KPP_CSp, dtdia)
+        endif
+
+        if (showCallTree) call callTree_waypoint("finished ALE_main (step_MOM_thermo)")
+        call cpu_clock_end(id_clock_ALE)
+      endif   ! endif for the block "if ( CS%use_ALE_algorithm )"
+    endif
 
     dynamics_stencil = min(3, G%Domain%nihalo, G%Domain%njhalo)
     call create_group_pass(pass_uv_T_S_h, u, v, G%Domain, halo=dynamics_stencil)
@@ -1785,6 +1792,10 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
                  "If true, use RK2 instead of RK3 in the unsplit time stepping.", &
                  default=.false.)
   endif
+
+  call get_param(param_file, "MOM", "ALE_INTERVAL", CS%ALE_interval, &
+                 "Number of calls to thermodynamics between ALE remapping steps", default=1)
+  CS%thermo_calls = 0
 
   call get_param(param_file, "MOM", "CALC_RHO_FOR_SEA_LEVEL", CS%calc_rho_for_sea_lev, &
                  "If true, the in-situ density is used to calculate the "//&
