@@ -33,8 +33,9 @@ use coord_adapt,  only : init_coord_adapt, adapt_CS, set_adapt_params, build_ada
 use coord_opt_bc, only : init_coord_opt_bc, opt_bc_CS, set_opt_bc_params
 use coord_opt_bc, only : build_opt_bc_column, end_coord_opt_bc
 use coord_opt_bc, only : OPT_BC_CHEBYSHEV, OPT_BC_COSINE
-use coord_opt_bc, only : create_sbl_grid, refine_opt_bc_column
+use coord_opt_bc, only : create_fixed_grid, refine_opt_bc_column
 use coord_opt_bc, only : concatenate_gl_bl, adjust_for_neighboring_bathy
+use coord_opt_bc, only : initialize_stewart_grid, merge_opt_bc_fixed
 
 implicit none ; private
 
@@ -209,7 +210,7 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
   real :: dz_fixed_sfc, Rho_avg_depth, nlay_sfc_int
   real :: adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha
   real :: adaptDrho0 ! Reference density difference for stratification-dependent diffusion. [R ~> kg m-3]
-  real :: opt_bc_min_n2, opt_bc_max_n2, max_top_thickness, bl_thickness_ratio
+  real :: opt_bc_min_n2, opt_bc_max_n2, max_top_thickness, min_cheby_depth, bl_thickness_ratio
   integer :: opt_bc_sample_method
   integer :: nz_fixed_sfc, k, nzf(4), nk_gl
   real, dimension(:), allocatable :: dz     ! Resolution (thickness) in units of coordinate, which may be [m]
@@ -225,6 +226,7 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
   real :: stewart_max_dz
   real :: stewart_S_h
   real :: stewart_H_max
+  real :: cheby_fill_depth
   ! Thicknesses [m] that give level centers corresponding to table 2 of WOA09
   real, dimension(40) :: woa09_dz = (/ 5.,  10.,  10.,  15.,  22.5, 25., 25.,  25.,  &
                                       37.5, 50.,  50.,  75., 100., 100., 100., 100., &
@@ -653,13 +655,41 @@ subroutine initialize_regridding(CS, GV, US, max_depth, param_file, mdl, coord_m
     call get_param(param_file, mdl, "OPT_BC_MAX_TOP_THICKNESS", max_top_thickness, &
                   "The maximum thickness that the top layer of the model can be\n"//&
                   "when creating layers near the surface", default = 2.)
+    call get_param(param_file, mdl, "MIN_CHEBY_DEPTH", min_cheby_depth, &
+                  "The minimum depth a column must be to use the Chebyshev grid.", &
+                   default = 1000.)
+    call get_param(param_file, mdl, "OPT_BC_STEWART_MIN_DZ", stewart_min_dz, &
+                  "The minimum layer thickness used to calculate the Stewart grid", &
+                  default = 1.)
+    call get_param(param_file, mdl, "OPT_BC_STEWART_MAX_DZ", stewart_max_dz, &
+                  "The maximum layer thickness used to calculate the Stewart grid", &
+                  default = 10.)
+    call get_param(param_file, mdl, "OPT_BC_STEWART_S_H", stewart_S_h , &
+                   "The shape parameter for the vertical tanh function", &
+                   default = 0.8)
+    call get_param(param_file, mdl, "OPT_BC_STEWART_H_MAX", stewart_H_max, &
+                   "The maximum depth to which the Stewart grid is calculated", &
+                   default = 1000.)
+        call get_param(param_file, mdl, "OPT_BC_FILL_DEPTH", cheby_fill_depth, &
+                   "Above this depth the Gauss-Lobatto grid will fill only a fraction of \n"//&
+                   "the interface positions that have not been set by the fixed grid. Below this depth \n"//&
+                   "all unset interface positions will be filled by Gauss-Lobatto points.", &
+                   default = 5000.)
+
 
     call set_regrid_params(CS, opt_bc_min_n2 = opt_bc_min_n2, &
                            opt_bc_max_n2 = opt_bc_max_n2, &
                            opt_bc_sample_method = opt_bc_sample_method, &
                            bl_thickness_ratio = bl_thickness_ratio, &
                            max_top_thickness = max_top_thickness, &
+                           min_cheby_depth = min_cheby_depth, &
+                           stewart_min_dz    =    stewart_min_dz, &
+                           stewart_max_dz    =    stewart_max_dz, &
+                           stewart_S_h       =       stewart_S_h, &
+                           stewart_H_max     =    stewart_H_max, &
+                           cheby_fill_depth  =    cheby_fill_depth, &
                            nk_gl = nk_gl)
+    call initialize_stewart_grid(CS%opt_bc_CS)
 
   endif
 
@@ -1577,7 +1607,7 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
   real, dimension(SZK_(GV)+1) :: z_col ! Source interface positions relative to the surface [H ~> m or kg m-2]
   real, dimension(CS%nk+1) ::    z_col_gl ! Interface positions on the Gauss-Lobatto grid relative to the surface
                                            ! [H ~> m or kg m-2]
-  real, dimension(CS%nk+1) ::    z_col_sbl ! Interface positions in the surface boundary layer
+  real, dimension(CS%nk+1) ::    z_col_fixed ! Interface positions in the surface boundary layer
                                            ! [H ~> m or kg m-2]
   real, dimension(CS%nk+1) ::    z_col_new ! New interface positions relative to the surface [H ~> m or kg m-2]
   real, dimension(CS%nk+1) ::    z_col_adjusted ! Interface positions relative to the surface after adjustment [H ~> m or kg m-2]
@@ -1587,9 +1617,9 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
                                              ! to the surface [H ~> m or kg m-2]
   real, dimension(SZK_(GV)+1) :: dz_col  ! The realized change in z_col [H ~> m or kg m-2]
   real, dimension(SZK_(GV))   :: p_col   ! Layer center pressure [Pa]
-  real, dimension(5) :: bathy_neighbors
+  real, dimension(4) :: bathy_neighbors
   real :: hscale, hscale_abs
-  integer   :: i, j, k, nki, nk_sbl, nk_concat, nk_ref_surf
+  integer   :: i, j, k, nki, nk_fixed, nk_concat, nk_ref_surf, nk_gl
   real :: depth, nominalDepth
   real :: h_neglect, h_neglect_edge
   real :: z_top_col, totalThickness
@@ -1624,34 +1654,55 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
         z_col(K+1) = z_col(K) + h(i,j,k)
       enddo
 
-      if (G%bathyT(i,j) < 1000.) then
-        call create_sbl_grid( CS%opt_bc_CS, GV, G%bathyT(i,j), z_col_gl(:), G%bathyT(i,j), z_col_sbl(:), nk_sbl )
-        z_col_new(:) = 0.
-        z_col_new(1:nk_sbl) = z_col_sbl(1:nk_sbl)
-        z_col_new(GV%ke+1) = G%bathyT(i,j)
-        do k=GV%ke,nk_sbl+1,-1
+      ! Create fixed z-star grid for shallow locations
+      !if (G%bathyT(i,j) < CS%opt_bc_CS%min_cheby_depth) then
+      !  call create_sbl_grid( CS%opt_bc_CS, GV, G%bathyT(i,j), z_col_gl(:), G%bathyT(i,j), z_col_sbl(:), nk_sbl )
+      !  z_col_new(1) = z_col(1)
+      !  z_col_new(2:nk_sbl) = z_col_sbl(2:nk_sbl)
+      !  z_col_new(GV%ke+1) = z_col(GV%ke+1) ! G%bathyT(i,j)
+      !  do k=GV%ke,nk_sbl+1,-1
+      !    z_col_new(k) = z_col_new(k+1) - GV%Angstrom_h
+      !  enddo
+      !  !call adjust_for_neighboring_bathy( CS%opt_bc_CS, GV, z_col_new, G%bathyT(i,j), G%bathyT(i,j)*bathy_frac)
+      !else
+      ! 
+      !bathy_neighbors(:) = MERGE(&
+      !  [ G%bathyT(i,j), G%bathyT(i-1,j),  G%bathyT(i+1,j), G%bathyT(i,j+1), G%bathyT(i,j-1) ], &
+      !  G%bathyT(i,j), &
+      !  [ G%mask2dT(i,j), G%mask2dT(i-1,j), G%mask2dT(i+1,j), G%mask2dT(i,j+1), G%mask2dT(i,j-1) ] > 0.)     
+      !
+      !  min_bathy = MINVAL(bathy_neighbors)
+      !  max_h = MAX(min_bathy*bathy_frac,CS%opt_bc_CS%max_top_thickness) 
+       
+        call create_fixed_grid( CS%opt_bc_CS, GV, G%bathyT(i,j), z_col_fixed(:), nk_fixed ) 
+
+        nk_gl =  ceiling( (GV%ke+1 - nk_fixed) * min( G%bathyT(i,j) / CS%opt_bc_CS%cheby_fill_depth, 1.0) )
+
+        call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_gl, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
+                                 z_col_gl(:), tv%eqn_of_state)
+      !  if (min_bathy < CS%opt_bc_CS%min_cheby_depth) then
+      !    call create_sbl_grid( CS%opt_bc_CS, GV, min_bathy, z_col_gl(:), G%bathyT(i,j), &
+      !                        z_col_sbl(:), nk_sbl )
+      !  else
+      !    call create_sbl_grid( CS%opt_bc_CS, GV, hbl(i,j), z_col_gl(:), G%bathyT(i,j), &
+      !                        z_col_sbl(:), nk_sbl )
+      !  endif
+        call merge_opt_bc_fixed( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_gl, z_col_fixed, nk_gl, nk_fixed, z_col_new )
+        
+
+        do k=GV%ke,nk_gl+nk_fixed,-1
           z_col_new(k) = z_col_new(k+1) - GV%Angstrom_h
         enddo
-      else
-        
-        bathy_neighbors(:) = MERGE(&
-          [ G%bathyT(i,j), G%bathyT(i-1,j),  G%bathyT(i+1,j), G%bathyT(i,j+1), G%bathyT(i,j-1) ], &
-          G%bathyT(i,j), &
-          [ G%mask2dT(i,j), G%mask2dT(i-1,j), G%mask2dT(i+1,j), G%mask2dT(i,j+1), G%mask2dT(i,j-1) ] > 0.)
-
-        min_bathy = MINVAL(bathy_neighbors)
-        max_h = MAX(min_bathy*bathy_frac,CS%opt_bc_CS%max_top_thickness) 
-
-        call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
-                                 z_col_gl(:), tv%eqn_of_state)
-        call create_sbl_grid( CS%opt_bc_CS, GV, hbl(i,j), z_col_gl(:), G%bathyT(i,j), &
-                              z_col_sbl(:), nk_sbl )
-        call concatenate_gl_bl( CS%opt_bc_CS, GV, z_col_gl(:), z_col_sbl(:), nk_sbl, z_col_tmp, nk_concat )
-!        call refine_surf_opt_bc_column( CS%opt_bc_CS, GV, z_col_tmp, nk_concat, min_bathy, max_h,  &
-!                                        z_col_ref_surf, nk_ref_surf )
-        call refine_opt_bc_column( CS%opt_bc_CS, GV, z_col_tmp, nk_concat, z_col_new )
+      !  call concatenate_gl_bl( CS%opt_bc_CS, GV, z_col_gl(:), z_col_sbl(:), nk_sbl, z_col_tmp, nk_concat )
+      !  call refine_opt_bc_column( CS%opt_bc_CS, GV, z_col_tmp, nk_concat, z_col_new )
+       
         !call adjust_for_neighboring_bathy( CS%opt_bc_CS, GV, z_col_new, min_bathy, max_h)
-      endif
+      !endif
+
+!        call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
+!                                 z_col_gl(:), tv%eqn_of_state)
+!        call refine_opt_bc_column( CS%opt_bc_CS, GV, z_col_gl, CS%opt_bc_CS%nk_gl, z_col_new )        
+
       ! Calculate the final change in grid position after blending new and old grids
       call filtered_grid_motion( CS, GV%ke, z_col, z_col_new, dz_col )
       ! This adjusts things robust to round-off errors
@@ -2395,7 +2446,8 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
              halocline_strat_tol, integrate_downward_for_e, remap_answers_2018, &
              adaptTimeRatio, adaptZoom, adaptZoomCoeff, adaptBuoyCoeff, adaptAlpha, adaptDoMin, adaptDrho0, &
              opt_bc_min_n2, opt_bc_max_n2, opt_bc_sample_method, &
-             nk_gl, bl_thickness_ratio, max_top_thickness )
+             nk_gl, bl_thickness_ratio, max_top_thickness, min_cheby_depth, stewart_min_dz, stewart_max_dz, &
+             stewart_S_h, stewart_H_max, cheby_fill_depth )
   type(regridding_CS), intent(inout) :: CS !< Regridding control structure
   logical, optional, intent(in) :: boundary_extrapolation !< Extrapolate in boundary cells
   real,    optional, intent(in) :: min_thickness    !< Minimum thickness allowed when building the
@@ -2439,9 +2491,17 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
   real,    optional, intent(in) :: opt_bc_max_n2    !< The minimum N2 allowed in the optimally sampled
                                                     !! baroclinic coordinate
   integer, optional, intent(in) :: opt_bc_sample_method !< The sampling method to use, either Chebyshev or cosine
+  real,    optional, intent(in) :: stewart_min_dz !< The minimum layer thickness used to calculate the Stewart grid
+  real,    optional, intent(in) :: stewart_max_dz !< The maximum layer thickness used to calculate the Stewart grid
+  real,    optional, intent(in) :: stewart_S_h    !< The shape parameter for the vertical tanh function
+  real,    optional, intent(in) :: stewart_H_max  !< The maximum estimated boundary layer depth of the ocean
+  real,    optional, intent(in) :: cheby_fill_depth !< Above this depth the Gauss-Lobatto grid will fill only a fraction of 
+                                                    !! the interface positions that have not been set by the fixed grid. 
+                                                    !! Below this depth all unset interface positions will be filled by Gauss-Lobatto points.
   integer, optional, intent(in) :: nk_gl !< The number of points used in the gauss-lobato grid
   real,    optional, intent(in) :: bl_thickness_ratio !< The ratio used in a geometric progression within the surface
   real,    optional, intent(in) :: max_top_thickness !<  The maximum thickness of the surface layer
+  real,    optional, intent(in) :: min_cheby_depth  !< The minimum depth a column must be to use the Chebyshev grid. 
 
   if (present(interp_scheme)) call set_interp_scheme(CS%interp_CS, interp_scheme)
   if (present(boundary_extrapolation)) call set_interp_extrap(CS%interp_CS, boundary_extrapolation)
@@ -2505,9 +2565,15 @@ subroutine set_regrid_params( CS, boundary_extrapolation, min_thickness, old_gri
     if (present(opt_bc_min_N2)) call set_opt_bc_params(CS%opt_bc_CS, min_N2 = opt_bc_min_N2)
     if (present(opt_bc_max_N2)) call set_opt_bc_params(CS%opt_bc_CS, max_N2 = opt_bc_max_N2)
     if (present(opt_bc_sample_method)) call set_opt_bc_params(CS%opt_bc_CS, sample_method = opt_bc_sample_method)
-    if (present(nk_gl)) call set_opt_bc_params(CS%opt_bc_CS, nk_gl = nk_gl)
+    if( present(stewart_min_dz))     call set_opt_bc_params(CS%opt_bc_CS, stewart_min_dz = stewart_min_dz)
+    if( present(stewart_max_dz))     call set_opt_bc_params(CS%opt_bc_CS, stewart_max_dz = stewart_max_dz)
+    if( present(stewart_S_h   ))     call set_opt_bc_params(CS%opt_bc_CS, stewart_S_h    = stewart_S_h)
+    if( present(stewart_H_max ))     call set_opt_bc_params(CS%opt_bc_CS, stewart_H_max  = stewart_H_max)
+    if( present(cheby_fill_depth ))     call set_opt_bc_params(CS%opt_bc_CS, cheby_fill_depth  = cheby_fill_depth)
+!    if (present(nk_gl)) call set_opt_bc_params(CS%opt_bc_CS, nk_gl = nk_gl)
     if (present(bl_thickness_ratio)) call set_opt_bc_params(CS%opt_bc_CS, bl_thickness_ratio = bl_thickness_ratio)
     if (present(max_top_thickness))  call set_opt_bc_params(CS%opt_bc_CS, max_top_thickness = max_top_thickness)
+    if (present(min_cheby_depth))  call set_opt_bc_params(CS%opt_bc_CS, min_cheby_depth = min_cheby_depth)
   end select
 
 end subroutine set_regrid_params
