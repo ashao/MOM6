@@ -519,21 +519,35 @@ subroutine merge_opt_bc_fixed( CS, GV, z_bottom, z_gl, z_fixed, nk_gl, nk_fixed,
   real, dimension(CS%nk+1), intent(in) :: z_fixed !< The interfaces from the fixed Stewart grid
   integer,                  intent(in) :: nk_gl   !< Number of points in the Gauss-Lobatto grid
   integer,                  intent(in) :: nk_fixed !< The number of layers of the fixed grid
-  real, dimension(GV%ke+1), intent(  out) :: z_interface_out !< The merged fixed and Gauss-Lobatto grids
+!  real, dimension(GV%ke+1), intent(  out) :: z_interface_out !< The merged fixed and Gauss-Lobatto grids
+  real, dimension(CS%nk+1), intent(  out) :: z_interface_out !< The merged fixed and Gauss-Lobatto grids
 
-  integer :: k_gl, k_fixed, k
+!  integer, dimension(nk_fixed) :: z_fixed_positions
+  integer, dimension(CS%nk+1) :: z_fixed_positions
+  integer :: k_gl, k_fixed, k, l, m,n, kk, km
   integer :: nk_combined
+  real :: points_between
+  integer :: counter
+  real :: dz_tmp
+  character(len=255) :: msg
+  logical :: new_way
+
+  new_way = .false.
 
   nk_combined = nk_gl + nk_fixed
 
   k_gl = 2
   k_fixed = 2
 
+  if (new_way == .false.) then
+
+  z_fixed_positions(1) = 1
   z_interface_out(1) = 0.
   do k=2,nk_combined
     if (k_fixed <= nk_fixed) then
       if (z_fixed(k_fixed) <= z_gl(k_gl)) then
         z_interface_out(k) = z_fixed(k_fixed)
+        z_fixed_positions(k_fixed) = k 
         k_fixed = k_fixed + 1
       else
         z_interface_out(k) = z_gl(k_gl)
@@ -544,31 +558,79 @@ subroutine merge_opt_bc_fixed( CS, GV, z_bottom, z_gl, z_fixed, nk_gl, nk_fixed,
       k_gl = k_gl + 1
     endif
   enddo
-  ! Manual unit test
-  !  st    gl
-  !  [0    0]
-  !  [1    2]
-  !  [3    3]
-  !  [4    4]
-  !        5
-  !        6
-  !
-  !k_st = 2 k_gl = 2
-  !z_interface(2) = 1
-  !k_st = 3 k_gl = 2
-  !z_interface(3) = 2
-  !k_st = 3 k_gl = 3
-  !z_interface(4) = 3
-  !k_st = 3 k_gl = 4
-  !z_interface(5) = 3
-  !k_st = 4 k_gl = 4
-  !z_interface(6) = 4
-  !k_st = 4 k_gl = 5
-  !z_interface(7) = 4
-  !k_st = 5 k_gl = 5
-  !z_interface(8) = 5
-  !k_st = 5 k_gl = 6
-  !z_interface(9) = 6
+
+  else
+
+  z_fixed_positions(1) = 1
+  z_interface_out(1) = 0.
+  do k=2,nk_combined
+    if ((k_fixed <= nk_fixed) .and. (k_gl <= nk_gl)) then
+      if (z_fixed(k_fixed) <= z_gl(k_gl)) then
+        z_interface_out(k) = z_fixed(k_fixed)
+        z_fixed_positions(k_fixed) = k
+        k_fixed = k_fixed + 1
+      else
+        z_interface_out(k) = z_gl(k_gl)
+        k_gl = k_gl + 1
+      endif
+    else if (k_fixed <= nk_fixed) then
+      z_interface_out(k) = z_fixed(k_fixed)
+      z_fixed_positions(k_fixed) = k
+      k_fixed = k_fixed + 1
+    else
+      z_interface_out(k) = z_gl(k_gl)
+      k_gl = k_gl + 1
+    endif
+  enddo
+
+  ! Insert Gauss-Lobatto points in an evenly spaced fashion in between the Stewart points
+  k_gl = 1
+  do m=2,nk_fixed
+    kk = z_fixed_positions(m)
+    km = z_fixed_positions(m-1)
+    dz_tmp = z_interface_out(kk) - z_interface_out(km)
+    points_between = kk - km
+    counter = 1
+    do l=km+1,kk-1
+      z_interface_out(l) = z_interface_out(km) + counter*(dz_tmp / points_between)       
+      counter = counter + 1
+      k_gl = k_gl + 1
+    enddo
+  enddo  
+
+  ! Insert any leftover Gauss-Lobatto points between the bathymetry and the last Stewart point
+  if (k_gl < nk_gl) then
+    dz_tmp = z_bottom - z_fixed(nk_fixed)
+    points_between = nk_gl - k_gl
+    kk = z_fixed_positions(nk_fixed)
+    counter = 1
+    do l = kk+1,kk+points_between
+      z_interface_out(l) = z_fixed(nk_fixed) + counter*(dz_tmp / (points_between+1))
+      counter = counter + 1
+    enddo 
+  endif
+ 
+  endif
+!  do k=1,nk_combined
+!    write(msg,*) TRIM("z_interface_out "), k, TRIM(": "),(z_interface_out(k))
+!  call MOM_error(NOTE,msg)
+!  enddo
+
+!  do n=1,nk_combined
+!    write(msg,*) TRIM("z_interface_out "), n, TRIM(": "),(z_interface_out(n))
+!  call MOM_error(NOTE,msg)
+!  enddo
+
+!  do k=nk_fixed,nk_fixed
+!    write(msg,*) TRIM("z_fixed_positions "), k, TRIM(": "),(z_fixed_positions(k))
+!  call MOM_error(NOTE,msg)
+!  enddo
+
+!    write(msg,*) TRIM("dz_tmp = "), dz_tmp, TRIM(", points_between = "),(points_between),  TRIM(", z_bot = "), z_bottom,  TRIM(", z_fixed = "), z_fixed(nk_fixed)    
+!  call MOM_error(NOTE,msg)
+
+!    write(msg,*) TRIM("k_gl = "), k_gl, TRIM(", nk_gl = "),(nk_gl)
+!  call MOM_error(NOTE,msg)
 
 end subroutine merge_opt_bc_fixed
 

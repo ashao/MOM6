@@ -3,7 +3,7 @@ module MOM_regridding
 
 ! This file is part of MOM6. See LICENSE.md for the license.
 
-use MOM_error_handler, only : MOM_error, FATAL, WARNING
+use MOM_error_handler, only : MOM_error, NOTE, FATAL, WARNING
 use MOM_file_parser,   only : param_file_type, get_param, log_param
 use MOM_io,            only : file_exists, field_exists, field_size, MOM_read_data
 use MOM_io,            only : verify_variable_units, slasher
@@ -1619,15 +1619,11 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
   real, dimension(SZK_(GV))   :: p_col   ! Layer center pressure [Pa]
   real, dimension(4) :: bathy_neighbors
   real :: hscale, hscale_abs
-  integer   :: i, j, k, nki, nk_fixed, nk_concat, nk_ref_surf, nk_gl
-  real :: depth, nominalDepth
-  real :: h_neglect, h_neglect_edge
+  integer   :: i, j, k, nki, nk_fixed, nk_gl
+  real :: nominalDepth
   real :: z_top_col, totalThickness
-  real :: boundary_layer_depth
-  real :: stretching
-  real :: min_bathy, max_h
   logical :: ice_shelf
-  real, parameter :: bathy_frac = 0.05
+  character(len=255) :: msg
 
   nki = min(GV%ke, CS%nk)
   ! ice_shelf = present(frac_shelf_h)
@@ -1654,54 +1650,19 @@ subroutine build_grid_opt_bc( G, GV, US, h, tv, h_new, dzInterface, hbl, CS)
         z_col(K+1) = z_col(K) + h(i,j,k)
       enddo
 
-      ! Create fixed z-star grid for shallow locations
-      !if (G%bathyT(i,j) < CS%opt_bc_CS%min_cheby_depth) then
-      !  call create_sbl_grid( CS%opt_bc_CS, GV, G%bathyT(i,j), z_col_gl(:), G%bathyT(i,j), z_col_sbl(:), nk_sbl )
-      !  z_col_new(1) = z_col(1)
-      !  z_col_new(2:nk_sbl) = z_col_sbl(2:nk_sbl)
-      !  z_col_new(GV%ke+1) = z_col(GV%ke+1) ! G%bathyT(i,j)
-      !  do k=GV%ke,nk_sbl+1,-1
-      !    z_col_new(k) = z_col_new(k+1) - GV%Angstrom_h
-      !  enddo
-      !  !call adjust_for_neighboring_bathy( CS%opt_bc_CS, GV, z_col_new, G%bathyT(i,j), G%bathyT(i,j)*bathy_frac)
-      !else
-      ! 
-      !bathy_neighbors(:) = MERGE(&
-      !  [ G%bathyT(i,j), G%bathyT(i-1,j),  G%bathyT(i+1,j), G%bathyT(i,j+1), G%bathyT(i,j-1) ], &
-      !  G%bathyT(i,j), &
-      !  [ G%mask2dT(i,j), G%mask2dT(i-1,j), G%mask2dT(i+1,j), G%mask2dT(i,j+1), G%mask2dT(i,j-1) ] > 0.)     
-      !
-      !  min_bathy = MINVAL(bathy_neighbors)
-      !  max_h = MAX(min_bathy*bathy_frac,CS%opt_bc_CS%max_top_thickness) 
-       
-        call create_fixed_grid( CS%opt_bc_CS, GV, G%bathyT(i,j), z_col_fixed(:), nk_fixed ) 
+      call create_fixed_grid( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_fixed(:), nk_fixed ) 
 
-        nk_gl =  ceiling( (GV%ke+1 - nk_fixed) * min( G%bathyT(i,j) / CS%opt_bc_CS%cheby_fill_depth, 1.0) )
+      nk_gl =  ceiling( (GV%ke+2 - nk_fixed) * min( z_col(GV%ke+1) / CS%opt_bc_CS%cheby_fill_depth, 1.0) )
 
-        call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_gl, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
-                                 z_col_gl(:), tv%eqn_of_state)
-      !  if (min_bathy < CS%opt_bc_CS%min_cheby_depth) then
-      !    call create_sbl_grid( CS%opt_bc_CS, GV, min_bathy, z_col_gl(:), G%bathyT(i,j), &
-      !                        z_col_sbl(:), nk_sbl )
-      !  else
-      !    call create_sbl_grid( CS%opt_bc_CS, GV, hbl(i,j), z_col_gl(:), G%bathyT(i,j), &
-      !                        z_col_sbl(:), nk_sbl )
-      !  endif
-        call merge_opt_bc_fixed( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_gl, z_col_fixed, nk_gl, nk_fixed, z_col_new )
-        
+      call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, nk_gl, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
+                               z_col_gl(:), tv%eqn_of_state)
 
-        do k=GV%ke,nk_gl+nk_fixed,-1
-          z_col_new(k) = z_col_new(k+1) - GV%Angstrom_h
-        enddo
-      !  call concatenate_gl_bl( CS%opt_bc_CS, GV, z_col_gl(:), z_col_sbl(:), nk_sbl, z_col_tmp, nk_concat )
-      !  call refine_opt_bc_column( CS%opt_bc_CS, GV, z_col_tmp, nk_concat, z_col_new )
-       
-        !call adjust_for_neighboring_bathy( CS%opt_bc_CS, GV, z_col_new, min_bathy, max_h)
-      !endif
+      call merge_opt_bc_fixed( CS%opt_bc_CS, GV, z_col(GV%ke+1), z_col_gl, z_col_fixed, nk_gl, nk_fixed, z_col_new )
 
-!        call build_opt_bc_column(CS%opt_bc_CS, GV, GV%ke, h(i,j,:), tv%T(i,j,:), tv%S(i,j,:), z_col(:), &
-!                                 z_col_gl(:), tv%eqn_of_state)
-!        call refine_opt_bc_column( CS%opt_bc_CS, GV, z_col_gl, CS%opt_bc_CS%nk_gl, z_col_new )        
+      z_col_new(GV%ke+1) = z_col(GV%ke+1)
+      do k=GV%ke,nk_gl+nk_fixed,-1
+        z_col_new(k) = z_col_new(k+1) - GV%Angstrom_h
+      enddo
 
       ! Calculate the final change in grid position after blending new and old grids
       call filtered_grid_motion( CS, GV%ke, z_col, z_col_new, dz_col )
