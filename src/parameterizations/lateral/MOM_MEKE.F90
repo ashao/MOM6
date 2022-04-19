@@ -118,6 +118,7 @@ type, public :: MEKE_CS ; private
   integer :: eke_src !< Integer specifying whether EKE is stepped forward prognostically (default, 0),
                      !! read in from a file (1), or inferred using the SMARTREDIS client (2)
   ! Inferring EKE from ML
+  logical :: online_analysis !< If true, post the EKE used in MOM6 at every timestep
   logical :: use_mke     !< If true, use mean kinetic energy when predicting EKE
   logical :: use_slope_z !< If true, use vertically averaged slope when predicting EKE
   logical :: use_rv_z    !< If true, use relative vorticity when predicting EKE
@@ -771,9 +772,9 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
       write(time_suffix,"(F16.0)") time_type_to_real(Time)
 
       call pass_var(MEKE%MEKE,G%Domain)
-      sr_return_code = client%put_tensor(trim("RV_")//trim(adjustl(time_suffix))//CS%key_suffix,  CS%rv_z,shape(CS%rv_z))
-      sr_return_code = client%put_tensor(trim("EKE_")//trim(adjustl(time_suffix))//CS%key_suffix, MEKE%MEKE,shape(MEKE%MEKE))
-      sr_return_code = client%put_tensor(trim("MKE_")//trim(adjustl(time_suffix))//CS%key_suffix, CS%mke,shape(CS%mke))
+      if (CS%online_analysis) then
+        sr_return_code = client%put_tensor(trim("EKE_")//trim(adjustl(time_suffix))//CS%key_suffix, MEKE%MEKE,shape(MEKE%MEKE))
+      endif
 
   end select
 
@@ -1386,6 +1387,9 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
 
       allocate(CS%features_array(size(MEKE%MEKE),CS%n_predictands))
       allocate(CS%MEKE_vec(size(MEKE%MEKE)))
+
+      call get_param(param_file, mdl, "ONLINE_ANALYSIS", CS%online_analysis, &
+                   "If true, post EKE used in MOM6 to the database for analysis", default=.true.)
 
     case default
       CS%eke_src = EKE_PROG
