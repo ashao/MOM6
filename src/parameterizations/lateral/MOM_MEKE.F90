@@ -16,9 +16,8 @@ use MOM_error_handler,    only : MOM_error, FATAL, WARNING, NOTE, MOM_mesg, is_r
 use MOM_file_parser,      only : read_param, get_param, log_version, param_file_type
 use MOM_grid,             only : ocean_grid_type
 use MOM_hor_index,        only : hor_index_type
-use MOM_interface_heights, only : find_eta
 use MOM_io,               only : vardesc, var_desc, slasher
-use MOM_time_manager,     only : time_type_to_real
+use MOM_MEKE_smartredis,  only : meke_smartredis_CS_type, meke_smartredis_init, infer_meke
 use MOM_smartredis,       only : client_type, smartredis_CS_type
 use MOM_string_functions, only : lowercase
 use MOM_restart,          only : MOM_restart_CS, register_restart_field, query_initialized
@@ -26,12 +25,10 @@ use MOM_unit_scaling,     only : unit_scale_type
 use MOM_variables,        only : vertvisc_type, thermo_var_ptrs
 use MOM_verticalGrid,     only : verticalGrid_type
 use MOM_MEKE_types,       only : MEKE_type
-use MOM_isopycnal_slopes, only : calc_isoneutral_slopes
 
 use time_interp_external_mod, only : init_external_field, time_interp_external
 use time_interp_external_mod, only : time_interp_external_init
 
-use iso_c_binding, only : c_float
 
 implicit none ; private
 
@@ -117,30 +114,7 @@ type, public :: MEKE_CS ; private
   character(len=30)        :: eke_var_name !< name of variable in ncfile
   integer :: eke_src !< Integer specifying whether EKE is stepped forward prognostically (default, 0),
                      !! read in from a file (1), or inferred using the SMARTREDIS client (2)
-  ! Inferring EKE from ML
-  logical :: online_analysis !< If true, post the EKE used in MOM6 at every timestep
-  logical :: use_mke     !< If true, use mean kinetic energy when predicting EKE
-  logical :: use_slope_z !< If true, use vertically averaged slope when predicting EKE
-  logical :: use_rv_z    !< If true, use relative vorticity when predicting EKE
-  logical :: use_div_sfc !< If true, use surface divergence when predicting EKE
-  logical :: use_def_sfc !< If true, use surface deformation when predicting EKE
-  logical :: use_rd_dx_z !< If true, use Rossby radius divided by grid spacing when predicting EKE
-  character(len=6) :: script_key = 'preeke' !< Key where the script for preprocessing is stored
-  character(len=5) :: model_key  = 'mleke'  !< Key where the ML-model is stored
-  real, dimension(:,:), allocatable :: mke
-  real, dimension(:,:), allocatable :: slope_z
-  real, dimension(:,:), allocatable :: rv_z
-  real, dimension(:,:), allocatable :: div_sfc
-  real, dimension(:,:), allocatable :: def_sfc
-  real, dimension(:,:), allocatable :: rd_dx_z
-  real(kind=c_float), dimension(:,:), allocatable :: features_array
-  real(kind=c_float), dimension(:), allocatable :: MEKE_vec
-  integer :: n_predictands !< How many predictands when inferring from an ML-aglorithm
-  character(len=7) :: key_suffix !< Suffix appended to every key sent to Redis
   type(diag_ctrl), pointer :: diag => NULL() !< A type that regulates diagnostics output
-  character(len=24), dimension(:), allocatable :: inputs  !< Key names associated with the inputs to the script/model
-  character(len=24), dimension(:), allocatable :: outputs !< Outputs from the script
-  character(len=24), dimension(1) :: EKE_key
   !>@{ Diagnostic handles
   integer :: id_MEKE = -1, id_Ue = -1, id_Kh = -1, id_src = -1
   integer :: id_Ub = -1, id_Ut = -1
@@ -154,11 +128,6 @@ type, public :: MEKE_CS ; private
   integer :: id_eke = -1
   ! Infrastructure
   integer :: id_clock_pass !< Clock for group pass calls
-  integer :: id_put_tensor
-  integer :: id_run_model
-  integer :: id_run_script
-  integer :: id_unpack_tensor
-  integer :: id_client_init
   type(group_pass_type) :: pass_MEKE !< Group halo pass handle for MEKE%MEKE and maybe MEKE%Kh_diff
   type(group_pass_type) :: pass_Kh   !< Group halo pass handle for MEKE%Kh, MEKE%Ku, and/or MEKE%Au
 end type MEKE_CS
@@ -232,33 +201,13 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
   real :: sdt       ! dt to use locally [T ~> s] (could be scaled to accelerate)
   real :: sdt_damp  ! dt for damping [T ~> s] (sdt could be split).
   logical :: use_drag_rate ! Flag to indicate drag_rate is finite
-  integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
-  integer :: input_idx
-  integer :: sr_return_code
-  real :: slope_t, u_t, v_t ! u and v interpolated to thickness point
-  real :: dvdx, dudy
-  real, dimension(SZIB_(G),SZJ_(G), SZK_(G)) :: h_u ! Thickness at u point
-  real, dimension(SZI_(G),SZJB_(G), SZK_(G)) :: h_v ! Thickness at v point
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(G)+1) :: slope_x ! Isoneutral slope at U point
-  real, dimension(SZI_(G),SZJB_(G),SZK_(G)+1) :: slope_y ! Isoneutral slope at V point
-  real, dimension(SZIB_(G),SZJ_(G)) :: slope_x_vert_avg ! Isoneutral slope at U point
-  real, dimension(SZI_(G),SZJB_(G)) :: slope_y_vert_avg ! Isoneutral slope at V point
-  real, dimension(SZI_(G), SZJ_(G), SZK_(G)+1) :: &
-    e             ! The interface heights relative to mean sea level [Z ~> m].
+  integer :: i, j, k, is, ie, js, je, nz
   real :: Idt
-  character(len=128), dimension(4) :: preprocess_in
-  character(len=128), dimension(1) :: preprocess_out
-  character(len=128), dimension(1) :: model_in
-  character(len=128), dimension(1) :: model_out
-  character(len=128), dimension(2) :: postprocess_in
-  character(len=128), dimension(1) :: postprocess_out
-  type(client_type) :: client
 
   character(len=24) :: time_suffix
   real :: time_real
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
-  Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
   Idt = 1./dt
 
   if (.not.CS%initialized) call MOM_error(FATAL, &
@@ -659,123 +608,8 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
         MEKE%MEKE(i,j) = data_eke(i,j) * G%mask2dT(i,j)
       enddo; enddo
     case (EKE_SMARTREDIS)
-      client = smartredis_CS%client
       call MEKE_lengthScales(CS, MEKE, G, GV, US, SN_u, SN_v, MEKE%MEKE, depth_tot, bottomFac2, barotrFac2, LmixScale)
-      call pass_vector(u, v, G%Domain)
-      ! Linear interpolation to estimate thickness at a velocity points
-      do k=1,nz; do j=js-1,je+1; do i=is-1,ie+1
-        h_u(I,j,k) = 0.5*(h(i,j,1) + h(i-1,j,1)) + GV%Angstrom_H
-        h_v(i,J,k) = 0.5*(h(i,j,1) + h(i,j-1,1)) + GV%Angstrom_H
-      enddo; enddo; enddo;
-      input_idx = 0
-      if (CS%use_mke    ) then
-        ! call calc_mke
-        ! Linear interpolation to estimate surface velocities at the thickness point
-        do j=js-1,je+1;do i=is-1,ie+1
-          u_t = 0.5*(u(I,j,1)+u(I-1,j,1))
-          v_t = 0.5*(v(i,J,1)+v(i,J-1,1))
-          CS%mke(i,j) = 0.5*( u_t*u_t + v_t*v_t )
-        enddo; enddo
-        if (CS%id_mke>0) call post_data(CS%id_mke, CS%mke, CS%diag)
-        input_idx = input_idx + 1
-        CS%features_array(:,input_idx) = pack(CS%mke,.true.)
-        preprocess_in(input_idx) = 'mke'//CS%key_suffix
-      endif
-      if (CS%use_slope_z) then
-        ! call calc_slope_z
-        call find_eta(h, tv, G, GV, US, e, halo_size=2)
-        call calc_isoneutral_slopes(G, GV, US, h, e, tv, dt*1.e-7, slope_x, slope_y)
-        call pass_vector(slope_x, slope_y, G%Domain)
-        do j=js-1,je+1; do i=is-1,ie+1
-          slope_x_vert_avg(i,j) = vertical_average(slope_x(i,j,2:(nz+1)), h_u(i,j,:), GV%H_subroundoff)
-          slope_y_vert_avg(i,j) = vertical_average(slope_y(i,j,2:(nz+1)), h_v(i,j,:), GV%H_subroundoff)
-        enddo; enddo
-        call pass_vector(slope_x_vert_avg, slope_y_vert_avg, G%Domain)
-        CS%slope_z(:,:) = 0.
-        do j=js,je; do i=is,ie
-          slope_t = 0.5*(slope_x_vert_avg(I,j)*G%mask2dCu(I,j)+slope_x_vert_avg(I-1,j)*G%mask2dCu(I-1,j))
-          CS%slope_z(i,j) = slope_t*slope_t
-          slope_t = 0.5*(slope_y_vert_avg(i,J)*G%mask2dCu(i,J)+slope_y_vert_avg(i,J-1)*G%mask2dCv(i,J-1))
-          CS%slope_z(i,j) = sqrt(CS%slope_z(i,j) + slope_t*slope_t)
-
-          slope_t = 0.5*(slope_x(I,j,2)*G%mask2dCu(I,j)+slope_x(I-1,j,2)*G%mask2dCu(I-1,j))
-          CS%slope_z(i,j) = sqrt(slope_t*slope_t)*G%mask2dT(i,j)
-
-          ! CS%slope_z(i,j) = sqrt( 0.25*( (slope_x_vert_avg(I,j)+slope_x_vert_avg(I-1,j))**2 + &
-          !                                (slope_y_vert_avg(i,J)+slope_y_vert_avg(i,J-1))**2) )
-        enddo; enddo
-
-        if (CS%id_slope_z>0) call post_data(CS%id_slope_z, CS%slope_z, CS%diag)
-        if (CS%id_slope_x>0) call post_data(CS%id_slope_x, slope_x, CS%diag)
-        if (CS%id_slope_y>0) call post_data(CS%id_slope_y, slope_y, CS%diag)
-        call pass_var(CS%slope_z, G%Domain)
-        input_idx = input_idx + 1
-        CS%features_array(:,input_idx) = pack(CS%slope_z,.true.)
-        preprocess_in(input_idx) = 'slope_z'//CS%key_suffix
-      endif
-      if (CS%use_rd_dx_z) then
-        call pass_var(MEKE%Rd_dx_h, G%Domain)
-        input_idx = input_idx + 1
-        preprocess_in(input_idx) = 'rd_dx_z'//CS%key_suffix
-        CS%features_array(:,input_idx) = pack(MEKE%Rd_dx_h,.true.)
-      endif
-      if (CS%use_rv_z   ) then
-        do J=Jsq-1,Jeq+1 ; do I=Isq-1,Ieq+1
-          dvdx = (v(i+1,J,1)*G%dyCv(i+1,J) - v(i,J,1)*G%dyCv(i,J))
-          dudy = (u(I,j+1,1)*G%dxCu(I,j+1) - u(I,j,1)*G%dxCu(I,j))
-          ! Assumed no slip
-          CS%rv_z(I,J) = (2.0-G%mask2dBu(I,J)) * (dvdx - dudy) * G%IareaBu(I,J)
-        enddo; enddo
-        ! call calc_rv_z
-        if (CS%id_rv>0) call post_data(CS%id_rv, CS%rv_z, CS%diag)
-        input_idx = input_idx + 1
-        CS%features_array(:,input_idx) = pack(CS%rv_z,.true.)
-        preprocess_in(input_idx) = 'rv_sfc'//CS%key_suffix
-      endif
-      if (CS%use_div_sfc) then
-        ! call calc_div_sfc
-        CS%div_sfc(:,:) = 0.
-        sr_return_code = client%put_tensor("div_sfc"//CS%key_suffix, CS%div_sfc, shape(CS%div_sfc))
-        input_idx = input_idx + 1
-        CS%inputs(input_idx) = 'div_sfc'//CS%key_suffix
-      endif
-      if (CS%use_def_sfc) then
-        ! call calc_def_sfc
-        CS%def_sfc(:,:) = 0.
-        sr_return_code = client%put_tensor("def_sfc"//CS%key_suffix, CS%def_sfc, shape(CS%def_sfc))
-        input_idx = input_idx + 1
-        CS%inputs(input_idx) = 'def_sfc'//CS%key_suffix
-      endif
-      call cpu_clock_begin(CS%id_put_tensor)
-      sr_return_code = client%put_tensor("features"//CS%key_suffix, CS%features_array, shape(CS%features_array))
-      call cpu_clock_end(CS%id_put_tensor)
-      model_out(1) = "EKE"//CS%key_suffix
-      model_in(1) = "features"//CS%key_suffix
-      call cpu_clock_begin(CS%id_run_model)
-      sr_return_code = smartredis_CS%client%run_model(CS%model_key, model_in, model_out)
-      call cpu_clock_end(CS%id_run_model)
-      if (client%SR_error_parser(sr_return_code)) then
-        call MOM_error(FATAL, "MEKE: run_model failed")
-      endif
-      postprocess_in(1) = model_out(1)
-      postprocess_in(2) = "EKE_shape"//CS%key_suffix
-      postprocess_out(1) = "EKE_2D"//CS%key_suffix
-
-      call cpu_clock_begin(CS%id_unpack_tensor)
-      sr_return_code = client%unpack_tensor( model_out(1), CS%MEKE_vec, shape(CS%MEKE_vec) )
-      call cpu_clock_end(CS%id_unpack_tensor)
-      MEKE%MEKE = reshape(CS%MEKE_vec, shape(MEKE%MEKE))
-      do j=js,je; do i=is,ie
-          MEKE%MEKE(i,j) = MIN(MAX(exp(MEKE%MEKE(i,j)),0.),2.)
-      enddo; enddo
-
-      write(time_suffix,"(F16.0)") time_type_to_real(Time)
-
-      call pass_var(MEKE%MEKE,G%Domain)
-      if (CS%online_analysis) then
-        sr_return_code = client%put_tensor(trim("EKE_")//trim(adjustl(time_suffix))//CS%key_suffix, MEKE%MEKE,shape(MEKE%MEKE))
-      endif
-
+      call infer_meke(G, GV, MEKE%MEKE, u, v, tv, h, dt, CS%smartredis_meke)
   end select
 
   call cpu_clock_begin(CS%id_clock_pass)
@@ -1252,7 +1086,6 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
   character(len=200) :: eke_filename, model_filename, script_filename
   integer :: i, j, is, ie, js, je, isd, ied, jsd, jed
   logical :: laplacian, biharmonic, useVarMix, coldStart
-  logical :: smartredis_colocated
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
   character(len=40)  :: mdl = "MOM_MEKE" ! This module's name.
@@ -1304,93 +1137,8 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
       eke_filename = trim(CS%inputdir) // trim(CS%eke_file)
       CS%id_eke = init_external_field(eke_filename, CS%eke_var_name, domain=G%Domain%mpp_domain)
     case ("smartredis")
-      client = smartredis_CS%client
       CS%eke_src = EKE_SMARTREDIS
-      CS%n_predictands = 0
-      write(CS%key_suffix, '(A,I6.6)') '_', PE_here()
-      sr_return_code = client%put_tensor("meta"//CS%key_suffix,&
-        REAL([G%isd_global, G%idg_offset, G%jsd_global, G%jdg_offset]),[4])
-      sr_return_code = client%put_tensor("geolat"//CS%key_suffix, G%geoLatT, shape(G%geoLatT))
-      sr_return_code = client%put_tensor("geolon"//CS%key_suffix, G%geoLonT, shape(G%geoLonT))
-      call get_param(param_file, mdl, "INPUTDIR", CS%inputdir, &
-                   "The directory in which all input files are found.", &
-                   default=".", do_not_log=.true.)
-      CS%inputdir = slasher(CS%inputdir)
-
-      call get_param(param_file, mdl, "BATCH_SIZE", batch_size, &
-                   "Batch size to use for inference", default=1)
-      call get_param(param_file, mdl, "EKE_BACKEND", backend, &
-                   "The computational backend to use for EKE inference (CPU or GPU)", default="GPU")
-
-      call get_param(param_file, mdl, "EKE_MODEL", model_filename, &
-                     "Filename of the a saved pyTorch model to use", fail_if_missing = .true.)
-
-      if (smartredis_CS%colocated) then
-        if (modulo(PE_here(),smartredis_CS%colocated_stride) == 0) then
-          sr_return_code = client%set_model_from_file(CS%model_key, trim(CS%inputdir)//trim(model_filename), &
-                                                      "TORCH", backend, batch_size=batch_size)
-        endif
-      else
-        if (is_root_pe()) then
-          sr_return_code = client%set_model_from_file(CS%model_key, trim(CS%inputdir)//trim(model_filename), &
-                                                      "TORCH", backend, batch_size=batch_size)
-          if (client%SR_error_parser(sr_return_code)) then
-            print *, sr_return_code
-            call MOM_error(FATAL, "MEKE: set_model failed")
-          endif
-        endif
-      endif
-      call get_param(param_file, mdl, "EKE_PREPROCESS_SCRIPT", script_filename, &
-                     "Filename of the preprocessing script", default='')
-      if (len_trim(script_filename) > 0 .and. is_root_pe()) then
-        sr_return_code = client%set_script_from_file(CS%script_key, "GPU", trim(CS%inputdir)//script_filename)
-      endif
-      call get_param(param_file, mdl, "USE_MKE", CS%use_mke, &
-                   "If true, use MKE as a predictand for EKE", default=.true.)
-      if (CS%use_mke) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%mke(isd:ied,jsd:jed)) ; CS%mke(:,:) = 0.
-      endif
-      call get_param(param_file, mdl, "USE_SLOPE_Z", CS%use_slope_z, &
-                   "If true, use vertically averaged slope as a predictand for EKE", default=.true.)
-      if (CS%use_slope_z) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%slope_z(isd:ied,jsd:jed)) ; CS%slope_z(:,:) = 0.
-      endif
-      call get_param(param_file, mdl, "USE_RV_SFC", CS%use_rv_z, &
-                   "If true, use surface relative vorticity as a predictand for EKE", default=.true.)
-      if (CS%use_rv_z) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%rv_z(isd:ied,jsd:jed)) ; CS%rv_z(:,:) = 0.
-      endif
-      call get_param(param_file, mdl, "USE_DIV_SFC", CS%use_div_sfc, &
-                   "If true, use surface divergence as a predictand for EKE", default=.false.)
-      if (CS%use_div_sfc) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%div_sfc(isd:ied,jsd:jed)) ; CS%div_sfc(:,:) = 0.
-      endif
-      call get_param(param_file, mdl, "USE_DEF_SFC", CS%use_def_sfc, &
-                   "If true, use surface deformation as a predictand for EKE", default=.false.)
-      if (CS%use_def_sfc) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%def_sfc(isd:ied,jsd:jed)) ; CS%def_sfc(:,:) = 0.
-      endif
-      call get_param(param_file, mdl, "USE_RD_DX_Z", CS%use_rd_dx_z, &
-                   "If true, use Rossby radius divided by grid spacing for EKE", default=.true.)
-      if (CS%use_rd_dx_z) then
-        CS%n_predictands = CS%n_predictands+1
-        allocate(CS%rd_dx_z(isd:ied,jsd:jed)) ; CS%rd_dx_z(:,:) = 0.
-      endif
-      allocate(CS%inputs(CS%n_predictands))
-      allocate(CS%outputs(CS%n_predictands))
-      sr_return_code = client%put_tensor("EKE_shape"//CS%key_suffix, shape(MEKE%MEKE), [2])
-
-      allocate(CS%features_array(size(MEKE%MEKE),CS%n_predictands))
-      allocate(CS%MEKE_vec(size(MEKE%MEKE)))
-
-      call get_param(param_file, mdl, "ONLINE_ANALYSIS", CS%online_analysis, &
-                   "If true, post EKE used in MOM6 to the database for analysis", default=.true.)
-
+      call smartredis_meke_init(diag, G, US, param_file, smartredis_CS, CS%smartredis_meke_cs)
     case default
       CS%eke_src = EKE_PROG
       ! Read all relevant parameters and write them to the model log.
@@ -1591,17 +1339,6 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
 
 ! Register fields for output from this module.
   CS%diag => diag
-  ! Diagnostics for SMARTREDIS
-  CS%id_mke = register_diag_field('ocean_model', 'MEKE_MKE', diag%axesT1, Time, &
-     'Mean Kinetic Energy', 'm2 s-2', conversion=US%L_T_to_m_s**2)
-  CS%id_slope_z= register_diag_field('ocean_model', 'MEKE_slope_z', diag%axesT1, Time, &
-     'Isopycnal slopes', 'm2 s-2', conversion=US%L_T_to_m_s**2)
-  CS%id_slope_x= register_diag_field('ocean_model', 'MEKE_slope_x', diag%axesCui, Time, &
-     'Isopycnal slopes', 'm2 s-2', conversion=US%L_T_to_m_s**2)
-  CS%id_slope_y= register_diag_field('ocean_model', 'MEKE_slope_y', diag%axesCvi, Time, &
-     'Isopycnal slopes', 'm2 s-2', conversion=US%L_T_to_m_s**2)
-  CS%id_rv= register_diag_field('ocean_model', 'MEKE_RV', diag%axesT1, Time, &
-     'relative vorticity', 'm2 s-2', conversion=US%L_T_to_m_s**2)
   CS%id_MEKE = register_diag_field('ocean_model', 'MEKE', diag%axesT1, Time, &
      'Mesoscale Eddy Kinetic Energy', 'm2 s-2', conversion=US%L_T_to_m_s**2)
   if (.not. allocated(MEKE%MEKE)) CS%id_MEKE = -1
@@ -1663,11 +1400,6 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
   endif
 
   CS%id_clock_pass = cpu_clock_id('(Ocean continuity halo updates)', grain=CLOCK_ROUTINE)
-  CS%id_client_init = cpu_clock_id('(SMARTREDIS client init)', grain=CLOCK_ROUTINE)
-  CS%id_put_tensor = cpu_clock_id('(SMARTREDIS put tensor)', grain=CLOCK_ROUTINE)
-  CS%id_run_model= cpu_clock_id('(SMARTREDIS run model)', grain=CLOCK_ROUTINE)
-  CS%id_run_script= cpu_clock_id('(SMARTREDIS run script)', grain=CLOCK_ROUTINE)
-  CS%id_unpack_tensor = cpu_clock_id('(SMARTREDIS unpack tensor )', grain=CLOCK_ROUTINE)
   ! Detect whether this instance of MEKE_init() is at the beginning of a run
   ! or after a restart. If at the beginning, we will initialize MEKE to a local
   ! equilibrium.
@@ -1818,28 +1550,6 @@ subroutine MEKE_end(MEKE)
   if (allocated(MEKE%GM_src)) deallocate(MEKE%GM_src)
   if (allocated(MEKE%MEKE)) deallocate(MEKE%MEKE)
 end subroutine MEKE_end
-
-!> Compute thickness weighted average of a column quantity
-real function vertical_average(h, uh, h_min)
-
-  real, dimension(:), intent(in) :: h  !< Layer Thicknesses
-  real, dimension(:), intent(in) :: uh !< Quantity to average
-  real, intent(in) :: h_min !< The vanishingly small layer thickness
-
-  real :: htot
-  integer :: k, nk
-
-  nk = size(uh)
-  htot = h_min
-  do k=1,nk
-    htot = htot + h(k)
-  enddo
-
-  vertical_average = 0.
-  do k=1,nk
-    vertical_average = vertical_average + (h(k)/htot)*uh(k)
-  enddo
-end function vertical_average
 
 !> Compute vertical integral of a column quantitity
 real function vertical_integral(h, uh)
