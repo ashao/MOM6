@@ -1810,7 +1810,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, restart_CSp, &
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
 
-  integer :: i, j, is, ie, js, je, isd, ied, jsd, jed, nz
+  integer :: i, j, k, is, ie, js, je, isd, ied, jsd, jed, nz
   integer :: IsdB, IedB, JsdB, JedB
   real    :: dtbt              ! If negative, this specifies the barotropic timestep as a fraction
                                ! of the maximum stable value [nondim].

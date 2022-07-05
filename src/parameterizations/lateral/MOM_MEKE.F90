@@ -129,6 +129,9 @@ type, public :: MEKE_CS ; private
   integer :: id_clock_pass !< Clock for group pass calls
   type(group_pass_type) :: pass_MEKE !< Group halo pass handle for MEKE%MEKE and maybe MEKE%Kh_diff
   type(group_pass_type) :: pass_Kh   !< Group halo pass handle for MEKE%Kh, MEKE%Ku, and/or MEKE%Au
+
+  type(meke_smartredis_cs_type) :: meke_smartredis_CS
+
 end type MEKE_CS
 
 contains
@@ -608,7 +611,7 @@ subroutine step_forward_MEKE(MEKE, h, SN_u, SN_v, visc, dt, G, GV, US, CS, hu, h
       enddo; enddo
     case (EKE_SMARTREDIS)
       call MEKE_lengthScales(CS, MEKE, G, GV, US, SN_u, SN_v, MEKE%MEKE, depth_tot, bottomFac2, barotrFac2, LmixScale)
-      call infer_meke(G, GV, MEKE%MEKE, u, v, tv, h, dt, CS%smartredis_meke)
+      call infer_meke(G, GV, MEKE%MEKE, u, v, tv, h, dt, CS%meke_smartredis_CS)
   end select
 
   call cpu_clock_begin(CS%id_clock_pass)
@@ -1135,7 +1138,7 @@ logical function MEKE_init(Time, G, US, param_file, diag, smartredis_CS, CS, MEK
       CS%id_eke = init_external_field(eke_filename, CS%eke_var_name, domain=G%Domain%mpp_domain)
     case ("smartredis")
       CS%eke_src = EKE_SMARTREDIS
-      call smartredis_meke_init(diag, G, US, param_file, smartredis_CS, CS%smartredis_meke_cs)
+      call meke_smartredis_init(diag, G, US, param_file, smartredis_CS, CS%meke_smartredis_CS)
     case default
       CS%eke_src = EKE_PROG
       ! Read all relevant parameters and write them to the model log.
