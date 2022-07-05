@@ -48,6 +48,9 @@ public update_OBC_segment_data
 public open_boundary_test_extern_uv
 public open_boundary_test_extern_h
 public open_boundary_zero_normal_flow
+public parse_segment_str
+public parse_segment_manifest_str
+public parse_segment_data_str
 public register_OBC, OBC_registry_init
 public register_file_OBC, file_OBC_end
 public segment_tracer_registry_init
@@ -61,12 +64,10 @@ public update_OBC_ramp
 public rotate_OBC_config
 public rotate_OBC_init
 public initialize_segment_data
+public flood_fill
+public flood_fill2
 
 integer, parameter, public :: OBC_NONE = 0      !< Indicates the use of no open boundary
-integer, parameter, public :: OBC_SIMPLE = 1    !< Indicates the use of a simple inflow open boundary
-integer, parameter, public :: OBC_WALL = 2      !< Indicates the use of a closed wall
-integer, parameter, public :: OBC_FLATHER =  3  !< Indicates the use of a Flather open boundary
-integer, parameter, public :: OBC_RADIATION = 4 !< Indicates the use of a radiation open boundary
 integer, parameter, public :: OBC_DIRECTION_N = 100 !< Indicates the boundary is an effective northern boundary
 integer, parameter, public :: OBC_DIRECTION_S = 200 !< Indicates the boundary is an effective southern boundary
 integer, parameter, public :: OBC_DIRECTION_E = 300 !< Indicates the boundary is an effective eastern boundary
@@ -77,23 +78,32 @@ integer, parameter         :: MAX_OBC_FIELDS = 100  !< Maximum number of data fi
 type, public :: OBC_segment_data_type
   integer :: fid                            !< handle from FMS associated with segment data on disk
   integer :: fid_dz                         !< handle from FMS associated with segment thicknesses on disk
-  character(len=8)                :: name   !< a name identifier for the segment data
+  character(len=8)  :: name                 !< a name identifier for the segment data
+  real              :: scale                !< A scaling factor for converting input data to
+                                            !! the internal units of this field
   real, allocatable :: buffer_src(:,:,:)    !< buffer for segment data located at cell faces
-                                            !! and on the original vertical grid
-  integer                         :: nk_src !< Number of vertical levels in the source data
+                                            !! and on the original vertical grid.  The values for tracers should
+                                            !! have the same units as the field they are being applied to?
+  integer           :: nk_src               !< Number of vertical levels in the source data
   real, allocatable :: dz_src(:,:,:)        !< vertical grid cell spacing of the incoming segment
                                             !! data, set in [Z ~> m] then scaled to [H ~> m or kg m-2]
-  real, allocatable :: buffer_dst(:,:,:)    !< buffer src data remapped to the target vertical grid
-  real                            :: value              !< constant value if fid is equal to -1
+  real, allocatable :: buffer_dst(:,:,:)    !< buffer src data remapped to the target vertical grid.
+                                            !! The values for tracers should have the same units as the field
+                                            !! they are being applied to?
+  real              :: value                !< constant value if fid is equal to -1
 end type OBC_segment_data_type
 
 !> Tracer on OBC segment data structure, for putting into a segment tracer registry.
 type, public :: OBC_segment_tracer_type
-  real, allocatable          :: t(:,:,:)              !< tracer concentration array
+  real, allocatable          :: t(:,:,:)              !< tracer concentration array in rescaled units,
+                                                      !! like [S ~> ppt] for salinity.
   real                       :: OBC_inflow_conc = 0.0 !< tracer concentration for generic inflows
   character(len=32)          :: name                  !< tracer name used for error messages
   type(tracer_type), pointer :: Tr => NULL()          !< metadata describing the tracer
-  real, allocatable          :: tres(:,:,:)           !< tracer reservoir array
+  real, allocatable          :: tres(:,:,:)           !< tracer reservoir array in rescaled units,
+                                                      !! like [S ~> ppt] for salinity.
+  real                       :: scale                 !< A scaling factor for converting the units of input
+                                                      !! data, like [S ppt-1 ~> 1] for salinity.
   logical                    :: is_initialized        !< reservoir values have been set when True
 end type OBC_segment_tracer_type
 
@@ -297,8 +307,8 @@ type, public :: ocean_OBC_type
   real, allocatable :: rx_oblique(:,:,:) !< Array storage for oblique boundary condition restarts [L2 T-2 ~> m2 s-2]
   real, allocatable :: ry_oblique(:,:,:) !< Array storage for oblique boundary condition restarts [L2 T-2 ~> m2 s-2]
   real, allocatable :: cff_normal(:,:,:) !< Array storage for oblique boundary condition restarts [L2 T-2 ~> m2 s-2]
-  real, allocatable :: tres_x(:,:,:,:)   !< Array storage of tracer reservoirs for restarts [conc L ~> conc m]
-  real, allocatable :: tres_y(:,:,:,:)   !< Array storage of tracer reservoirs for restarts [conc L ~> conc m]
+  real, allocatable :: tres_x(:,:,:,:)   !< Array storage of tracer reservoirs for restarts, in unscaled units [conc]
+  real, allocatable :: tres_y(:,:,:,:)   !< Array storage of tracer reservoirs for restarts, in unscaled units [conc]
   real :: silly_h  !< A silly value of thickness outside of the domain that can be used to test
                    !! the independence of the OBCs to this external data [H ~> m or kg m-2].
   real :: silly_u  !< A silly value of velocity outside of the domain that can be used to test
@@ -310,6 +320,9 @@ type, public :: ocean_OBC_type
   real :: ramp_value                        !< If ramp is True, where we are on the ramp from
                                             !! zero to one [nondim].
   type(time_type) :: ramp_start_time        !< Time when model was started.
+  logical :: answers_2018   !< If true, use the order of arithmetic and expressions for remapping
+                            !! that recover the answers from the end of 2018.  Otherwise, use more
+                            !! robust and accurate forms of mathematically equivalent expressions.
 end type ocean_OBC_type
 
 !> Control structure for open boundaries that read from files.
@@ -357,11 +370,10 @@ subroutine open_boundary_config(G, US, param_file, OBC)
   character(len=1024) :: segment_str      ! The contents (rhs) for parameter "segment_param_str"
   character(len=200) :: config1          ! String for OBC_USER_CONFIG
   real               :: Lscale_in, Lscale_out ! parameters controlling tracer values at the boundaries [L ~> m]
-  character(len=128) :: inputdir
   logical :: answers_2018, default_2018_answers
   logical :: check_reconstruction, check_remapping, force_bounds_in_subcell
-  character(len=32)  :: remappingScheme
-! This include declares and sets the variable "version".
+  character(len=64)  :: remappingScheme
+  ! This include declares and sets the variable "version".
 # include "version_variable.h"
 
   allocate(OBC)
@@ -608,7 +620,7 @@ subroutine open_boundary_config(G, US, param_file, OBC)
     call get_param(param_file, mdl, "DEFAULT_2018_ANSWERS", default_2018_answers, &
                  "This sets the default value for the various _2018_ANSWERS parameters.", &
                  default=.false.)
-    call get_param(param_file, mdl, "REMAPPING_2018_ANSWERS", answers_2018, &
+    call get_param(param_file, mdl, "REMAPPING_2018_ANSWERS", OBC%answers_2018, &
                  "If true, use the order of arithmetic and expressions that recover the "//&
                  "answers from the end of 2018.  Otherwise, use updated and more robust "//&
                  "forms of the same expressions.", default=default_2018_answers)
@@ -616,7 +628,7 @@ subroutine open_boundary_config(G, US, param_file, OBC)
     allocate(OBC%remap_CS)
     call initialize_remapping(OBC%remap_CS, remappingScheme, boundary_extrapolation = .false., &
                check_reconstruction=check_reconstruction, check_remapping=check_remapping, &
-               force_bounds_in_subcell=force_bounds_in_subcell, answers_2018=answers_2018)
+               force_bounds_in_subcell=force_bounds_in_subcell, answers_2018=OBC%answers_2018)
 
   endif ! OBC%number_of_segments > 0
 
@@ -642,16 +654,18 @@ end subroutine open_boundary_config
 
 !> Allocate space for reading OBC data from files. It sets up the required vertical
 !! remapping. In the process, it does funky stuff with the MPI processes.
-subroutine initialize_segment_data(G, OBC, PF)
-  type(ocean_grid_type), intent(in) :: G    !< Ocean grid structure
+subroutine initialize_segment_data(G, GV, US, OBC, PF)
+  type(ocean_grid_type),        intent(in)    :: G   !< Ocean grid structure
+  type(verticalGrid_type),      intent(in)    :: GV  !< Container for vertical grid information
+  type(unit_scale_type),        intent(in)    :: US  !< A dimensional unit scaling type
   type(ocean_OBC_type), target, intent(inout) :: OBC !< Open boundary control structure
-  type(param_file_type), intent(in) :: PF   !< Parameter file handle
+  type(param_file_type),        intent(in)    :: PF  !< Parameter file handle
 
   integer :: n, m, num_fields
   character(len=1024) :: segstr
   character(len=256) :: filename
   character(len=20)  :: segnam, suffix
-  character(len=32)  :: varnam, fieldname
+  character(len=32)  :: fieldname
   real               :: value  ! A value that is parsed from the segment data string [various units]
   character(len=32), dimension(MAX_OBC_FIELDS) :: fields  ! segment field names
   character(len=128) :: inputdir
@@ -718,8 +732,8 @@ subroutine initialize_segment_data(G, OBC, PF)
     allocate(segment%field(num_fields))
     segment%num_fields = num_fields
 
-    segment%temp_segment_data_exists=.false.
-    segment%salt_segment_data_exists=.false.
+    segment%temp_segment_data_exists = .false.
+    segment%salt_segment_data_exists = .false.
 !!
 ! CODE HERE FOR OTHER OPTIONS (CLAMPED, NUDGED,..)
 !!
@@ -737,13 +751,14 @@ subroutine initialize_segment_data(G, OBC, PF)
         OBC%needs_IO_for_data = .true. ! At least one segment is using I/O for OBC data
 !       segment%values_needed = .true. ! Indicates that i/o will be needed for this segment
         segment%field(m)%name = trim(fields(m))
+        segment%field(m)%scale = scale_factor_from_name(fields(m), GV, US)
         if (segment%field(m)%name == 'TEMP') then
-           segment%temp_segment_data_exists=.true.
-           segment%t_values_needed = .false.
+          segment%temp_segment_data_exists = .true.
+          segment%t_values_needed = .false.
         endif
         if (segment%field(m)%name == 'SALT') then
-           segment%salt_segment_data_exists=.true.
-           segment%s_values_needed = .false.
+          segment%salt_segment_data_exists = .true.
+          segment%s_values_needed = .false.
         endif
         filename = trim(inputdir)//trim(filename)
         fieldname = trim(fieldname)//trim(suffix)
@@ -851,7 +866,7 @@ subroutine initialize_segment_data(G, OBC, PF)
               endif
             endif
           endif
-          segment%field(m)%buffer_src(:,:,:)=0.0
+          segment%field(m)%buffer_src(:,:,:) = 0.0
           segment%field(m)%fid = init_external_field(trim(filename), trim(fieldname), &
                     ignore_axis_atts=.true., threading=SINGLE_FILE)
           if (siz(3) > 1) then
@@ -892,8 +907,12 @@ subroutine initialize_segment_data(G, OBC, PF)
         endif
       else
         segment%field(m)%fid = -1
-        segment%field(m)%value = value
         segment%field(m)%name = trim(fields(m))
+        ! The scale factor for tracers is set in register_segment_tracer, and value is
+        ! rescaled there.  scale_factor_from_name returns 1 for tracers.
+        segment%field(m)%scale = scale_factor_from_name(fields(m), GV, US)
+        segment%field(m)%value = segment%field(m)%scale * value
+
         ! Check if this is a tidal field. If so, the number
         ! of expected constituents must be 1.
         if ((index(segment%field(m)%name, 'phase') > 0) .or. (index(segment%field(m)%name, 'amp') > 0)) then
@@ -948,6 +967,28 @@ subroutine initialize_segment_data(G, OBC, PF)
 
 end subroutine initialize_segment_data
 
+!> Return an appropriate dimensional scaling factor for input data based on an OBC segment data
+!! name, or 1 for tracers or other fields that do not match one of the specified names.
+real function scale_factor_from_name(name, GV, US)
+  character(len=*),        intent(in) :: name  !< The OBC segment data name to interpret
+  type(verticalGrid_type), intent(in) :: GV  !< Container for vertical grid information
+  type(unit_scale_type),   intent(in) :: US  !< A dimensional unit scaling type
+
+  select case (trim(name))
+    case ('U') ; scale_factor_from_name = US%m_s_to_L_T
+    case ('V') ; scale_factor_from_name = US%m_s_to_L_T
+    case ('Uamp') ; scale_factor_from_name = US%m_s_to_L_T
+    case ('Vamp') ; scale_factor_from_name = US%m_s_to_L_T
+    case ('DVDX') ; scale_factor_from_name = US%T_to_s
+    case ('DUDY') ; scale_factor_from_name = US%T_to_s
+    case ('SSH') ; scale_factor_from_name = GV%m_to_H
+    case ('SSHamp') ; scale_factor_from_name = GV%m_to_H
+    case default ; scale_factor_from_name = 1.0
+  end select
+
+end function scale_factor_from_name
+
+!> Initize parameters and fields related to the specification of tides at open boundaries.
 subroutine initialize_obc_tides(OBC, US, param_file)
   type(ocean_OBC_type), intent(inout) :: OBC  !< Open boundary control structure
   type(unit_scale_type),   intent(in) :: US   !< A dimensional unit scaling type
@@ -1630,7 +1671,7 @@ end subroutine parse_segment_data_str
 
 !> Parse all the OBC_SEGMENT_%%%_DATA strings again
 !! to see which need tracer reservoirs (all pes need to know).
- subroutine parse_for_tracer_reservoirs(OBC, PF, use_temperature)
+subroutine parse_for_tracer_reservoirs(OBC, PF, use_temperature)
   type(ocean_OBC_type), target, intent(inout) :: OBC !< Open boundary control structure
   type(param_file_type),  intent(in) :: PF  !< Parameter file handle
   logical,                intent(in) :: use_temperature !< If true, T and S are used
@@ -1640,11 +1681,10 @@ end subroutine parse_segment_data_str
   character(len=1024) :: segstr
   character(len=256) :: filename
   character(len=20)  :: segnam, suffix
-  character(len=32)  :: varnam, fieldname
+  character(len=32)  :: fieldname
   real               :: value  ! A value that is parsed from the segment data string [various units]
   character(len=32), dimension(MAX_OBC_FIELDS) :: fields  ! segment field names
   type(OBC_segment_type), pointer :: segment => NULL() ! pointer to segment type list
-  character(len=256) :: mesg    ! Message for error messages.
 
   do n=1, OBC%number_of_segments
     segment => OBC%segment(n)
@@ -1695,88 +1735,6 @@ end subroutine parse_segment_data_str
 
 end subroutine parse_for_tracer_reservoirs
 
-!> Parse an OBC_SEGMENT_%%%_PARAMS string
-subroutine parse_segment_param_real(segment_str, var, param_value, debug )
-  character(len=*),  intent(in)  :: segment_str !< A string in form of
-                                                !! "VAR1=file:foo1.nc(varnam1),VAR2=file:foo2.nc(varnam2),..."
-  character(len=*),  intent(in)  :: var         !< The name of the variable for which parameters are needed
-  real,              intent(out) :: param_value !< The value of the parameter
-  logical, optional, intent(in)  :: debug       !< If present and true, write verbose debugging messages
-  ! Local variables
-  character(len=128) :: word1, word2, word3, method
-  integer :: lword, nfields, n, m
-  logical :: continue,dbg
-  character(len=32), dimension(MAX_OBC_FIELDS) :: flds
-
-  nfields = 0
-  continue = .true.
-  dbg = .false.
-  if (PRESENT(debug)) dbg = debug
-
-  do while (continue)
-    word1 = extract_word(segment_str,',',nfields+1)
-    if (trim(word1) == '') exit
-    nfields = nfields+1
-    word2 = extract_word(word1,'=',1)
-    flds(nfields) = trim(word2)
-  enddo
-
-  ! if (PRESENT(fields)) then
-  !   do n=1,nfields
-  !     fields(n) = flds(n)
-  !   enddo
-  ! endif
-
-  ! if (PRESENT(num_fields)) then
-  !   num_fields = nfields
-  !   return
-  ! endif
-
-  m=0
-! if (PRESENT(var)) then
-    do n=1,nfields
-      if (trim(var)==trim(flds(n))) then
-        m = n
-        exit
-      endif
-    enddo
-    if (m==0) then
-      call abort()
-    endif
-
-    ! Process first word which will start with the fieldname
-    word3 = extract_word(segment_str,',',m)
-!     word1 = extract_word(word3,':',1)
-!     if (trim(word1) == '') exit
-    word2 = extract_word(word1,'=',1)
-    if (trim(word2) == trim(var)) then
-      method=trim(extract_word(word1,'=',2))
-      lword=len_trim(method)
-      read(method(1:lword),*,err=987) param_value
-      ! if (method(lword-3:lword) == 'file') then
-      !   ! raise an error id filename/fieldname not in argument list
-      !   word1 = extract_word(word3,':',2)
-      !   filenam = extract_word(word1,'(',1)
-      !   fieldnam = extract_word(word1,'(',2)
-      !   lword=len_trim(fieldnam)
-      !   fieldnam = fieldnam(1:lword-1)  ! remove trailing parenth
-      !   value=-999.
-      ! elseif (method(lword-4:lword) == 'value') then
-      !   filenam = 'none'
-      !   fieldnam = 'none'
-      !   word1 = extract_word(word3,':',2)
-      !   lword=len_trim(word1)
-      !   read(word1(1:lword),*,end=986,err=987) value
-      ! endif
-    endif
-! endif
-
-  return
-  986 call MOM_error(FATAL,'End of record while parsing segment data specification! '//trim(segment_str))
-  987 call MOM_error(FATAL,'Error while parsing segment parameter specification! '//trim(segment_str))
-
-end subroutine parse_segment_param_real
-
 !> Initialize open boundary control structure and do any necessary rescaling of OBC
 !! fields that have been read from a restart file.
 subroutine open_boundary_init(G, GV, US, param_file, OBC, restart_CS)
@@ -1821,8 +1779,8 @@ subroutine open_boundary_init(G, GV, US, param_file, OBC, restart_CS)
   ! points per timestep, but if this were to be corrected to [L T-1 ~> m s-1] or [T-1 ~> s-1] to
   ! permit timesteps to change between calls to the OBC code, the following would be needed:
 !  if ( OBC%radiation_BCs_exist_globally .and. (US%s_to_T_restart * US%m_to_L_restart /= 0.0) .and. &
-!       ((US%m_to_L * US%s_to_T_restart) /= (US%m_to_L_restart * US%s_to_T)) ) then
-!    vel_rescale = (US%m_to_L * US%s_to_T_restart) /  (US%m_to_L_restart * US%s_to_T)
+!       (US%s_to_T_restart /= US%m_to_L_restart) ) then
+!    vel_rescale = US%s_to_T_restart /  US%m_to_L_restart
 !    if (query_initialized(OBC%rx_normal, "rx_normal", restart_CS)) then
 !      do k=1,nz ; do j=jsd,jed ; do I=IsdB,IedB
 !        OBC%rx_normal(I,j,k) = vel_rescale * OBC%rx_normal(I,j,k)
@@ -1837,8 +1795,8 @@ subroutine open_boundary_init(G, GV, US, param_file, OBC, restart_CS)
 
   ! The oblique boundary condition terms have units of [L2 T-2 ~> m2 s-2] and may need to be rescaled.
   if ( OBC%oblique_BCs_exist_globally .and. (US%s_to_T_restart * US%m_to_L_restart /= 0.0) .and. &
-       ((US%m_to_L * US%s_to_T_restart) /= (US%m_to_L_restart * US%s_to_T)) ) then
-    vel2_rescale = (US%m_to_L * US%s_to_T_restart)**2 /  (US%m_to_L_restart * US%s_to_T)**2
+       (US%s_to_T_restart /= US%m_to_L_restart) ) then
+    vel2_rescale = US%s_to_T_restart**2 /  US%m_to_L_restart**2
     if (query_initialized(OBC%rx_oblique, "rx_oblique", restart_CS)) then
       do k=1,nz ; do j=jsd,jed ; do I=IsdB,IedB
         OBC%rx_oblique(I,j,k) = vel2_rescale * OBC%rx_oblique(I,j,k)
@@ -2073,6 +2031,8 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC)
   type(ocean_OBC_type), target, intent(inout) :: OBC !< Open boundary control structure
 
   type(OBC_segment_type), pointer :: segment => NULL()
+  real :: I_scale         ! The inverse of the scaling factor for the tracers.
+                          ! For salinity the units would be [ppt S-1 ~> 1]
   integer :: i, j, k, m, n
 
   do n=1,OBC%number_of_segments
@@ -2081,10 +2041,11 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC)
       if (segment%is_E_or_W) then
         I = segment%HI%IsdB
         do m=1,OBC%ntr
+          I_scale = 1.0 ; if (segment%tr_Reg%Tr(m)%scale /= 0.0) I_scale = 1.0 / segment%tr_Reg%Tr(m)%scale
           if (allocated(segment%tr_Reg%Tr(m)%tres)) then
             do k=1,GV%ke
               do j=segment%HI%jsd,segment%HI%jed
-                OBC%tres_x(I,j,k,m) = segment%tr_Reg%Tr(m)%t(i,j,k)
+                OBC%tres_x(I,j,k,m) = I_scale * segment%tr_Reg%Tr(m)%t(i,j,k)
               enddo
             enddo
           endif
@@ -2092,10 +2053,11 @@ subroutine setup_OBC_tracer_reservoirs(G, GV, OBC)
       else
         J = segment%HI%JsdB
         do m=1,OBC%ntr
+          I_scale = 1.0 ; if (segment%tr_Reg%Tr(m)%scale /= 0.0) I_scale = 1.0 / segment%tr_Reg%Tr(m)%scale
           if (allocated(segment%tr_Reg%Tr(m)%tres)) then
             do k=1,GV%ke
               do i=segment%HI%isd,segment%HI%ied
-                OBC%tres_y(i,J,k,m) = segment%tr_Reg%Tr(m)%t(i,J,k)
+                OBC%tres_y(i,J,k,m) = I_scale * segment%tr_Reg%Tr(m)%t(i,J,k)
               enddo
             enddo
           endif
@@ -2205,7 +2167,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, GV, US,
           if (allocated(segment%tr_Reg%Tr(m)%tres)) then
             do k=1,GV%ke
               do j=segment%HI%jsd,segment%HI%jed
-                segment%tr_Reg%Tr(m)%tres(I,j,k) = OBC%tres_x(I,j,k,m)
+                segment%tr_Reg%Tr(m)%tres(I,j,k) = segment%tr_Reg%Tr(m)%scale * OBC%tres_x(I,j,k,m)
               enddo
             enddo
           endif
@@ -2216,7 +2178,7 @@ subroutine radiation_open_bdry_conds(OBC, u_new, u_old, v_new, v_old, G, GV, US,
           if (allocated(segment%tr_Reg%Tr(m)%tres)) then
             do k=1,GV%ke
               do i=segment%HI%isd,segment%HI%ied
-                segment%tr_Reg%Tr(m)%tres(i,J,k) = OBC%tres_y(i,J,k,m)
+                segment%tr_Reg%Tr(m)%tres(i,J,k) = segment%tr_Reg%Tr(m)%scale * OBC%tres_y(i,J,k,m)
               enddo
             enddo
           endif
@@ -3490,7 +3452,6 @@ subroutine allocate_OBC_segment_data(OBC, segment)
   integer :: isd, ied, jsd, jed
   integer :: IsdB, IedB, JsdB, JedB
   integer :: IscB, IecB, JscB, JecB
-  character(len=40)  :: mdl = "allocate_OBC_segment_data" ! This subroutine's name.
 
   isd = segment%HI%isd ; ied = segment%HI%ied
   jsd = segment%HI%jsd ; jed = segment%HI%jed
@@ -3576,8 +3537,6 @@ end subroutine allocate_OBC_segment_data
 !> Deallocate segment data fields
 subroutine deallocate_OBC_segment_data(segment)
   type(OBC_segment_type), intent(inout) :: segment !< Open boundary segment
-  ! Local variables
-  character(len=40)  :: mdl = "deallocate_OBC_segment_data" ! This subroutine's name.
 
   if (.not. segment%on_pe) return
 
@@ -3709,14 +3668,11 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
   ! Local variables
   integer :: c, i, j, k, is, ie, js, je, isd, ied, jsd, jed
   integer :: IsdB, IedB, JsdB, JedB, n, m, nz
-  character(len=40)  :: mdl = "update_OBC_segment_data" ! This subroutine's name.
-  character(len=200) :: filename, OBC_file, inputdir ! Strings for file/path
   type(OBC_segment_type), pointer :: segment => NULL()
   integer, dimension(4) :: siz
   real, dimension(:,:,:), pointer :: tmp_buffer_in => NULL()  ! Unrotated input [various units]
   integer :: ni_seg, nj_seg  ! number of src gridpoints along the segments
   integer :: ni_buf, nj_buf  ! Number of filled values in tmp_buffer
-  integer :: i2, j2          ! indices for referencing local domain array
   integer :: is_obc, ie_obc, js_obc, je_obc  ! segment indices within local domain
   integer :: ishift, jshift  ! offsets for staggered locations
   real, dimension(:,:,:), allocatable, target :: tmp_buffer ! A buffer for input data [various units]
@@ -3725,11 +3681,12 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
   real :: net_H_src   ! Total thickness of the incoming flow in the source field [H ~> m or kg m-2]
   real :: net_H_int   ! Total thickness of the incoming flow in the model [H ~> m or kg m-2]
   real :: scl_fac     ! A scaling factor to compensate for differences in total thicknesses [nondim]
-  real :: tidal_vel   ! Interpolated tidal velocity at the OBC points [m s-1]
-  real :: tidal_elev  ! Interpolated tidal elevation at the OBC points [m]
+  real :: tidal_vel   ! Interpolated tidal velocity at the OBC points [L T-1 ~> m s-1]
+  real :: tidal_elev  ! Interpolated tidal elevation at the OBC points [H ~> m or kg m-2]
   real, allocatable :: normal_trans_bt(:,:) ! barotropic transport [H L2 T-1 ~> m3 s-1]
   integer :: turns    ! Number of index quarter turns
   real :: time_delta  ! Time since tidal reference date [T ~> s]
+  real :: h_neglect, h_neglect_edge ! Small thicknesses [H ~> m or kg m-2]
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec
   isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
@@ -3741,6 +3698,14 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
   if (.not. associated(OBC)) return
 
   if (OBC%add_tide_constituents) time_delta = US%s_to_T * time_type_to_real(Time - OBC%time_ref)
+
+  if (.not. OBC%answers_2018) then
+    h_neglect = GV%H_subroundoff ; h_neglect_edge = GV%H_subroundoff
+  elseif (GV%Boussinesq) then
+    h_neglect = GV%m_to_H * 1.0e-30 ; h_neglect_edge = GV%m_to_H * 1.0e-10
+  else
+    h_neglect = GV%kg_m2_to_H * 1.0e-30 ; h_neglect_edge = GV%kg_m2_to_H * 1.0e-10
+  endif
 
   do n = 1, OBC%number_of_segments
     segment => OBC%segment(n)
@@ -3873,7 +3838,9 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
           tmp_buffer_in => tmp_buffer
         endif
 
-        call time_interp_external(segment%field(m)%fid,Time, tmp_buffer_in)
+        ! This is where the data values are actually read in.
+        call time_interp_external(segment%field(m)%fid, Time, tmp_buffer_in, scale=segment%field(m)%scale)
+
         ! NOTE: Rotation of face-points require that we skip the final value
         if (turns /= 0) then
           ! TODO: This is hardcoded for 90 degrees, and needs to be generalized.
@@ -3940,7 +3907,8 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
         ! no dz for tidal variables
         if (segment%field(m)%nk_src > 1 .and.&
             (index(segment%field(m)%name, 'phase') <= 0 .and. index(segment%field(m)%name, 'amp') <= 0)) then
-          call time_interp_external(segment%field(m)%fid_dz,Time, tmp_buffer_in)
+          ! This is where the 2-d tidal data values are actually read in.
+          call time_interp_external(segment%field(m)%fid_dz, Time, tmp_buffer_in, scale=US%m_to_Z)
           if (turns /= 0) then
             ! TODO: This is hardcoded for 90 degrees, and needs to be generalized.
             if (segment%is_E_or_W &
@@ -4006,19 +3974,22 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,J,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 elseif (G%mask2dCu(I,j)>0.) then
                   h_stack(:) = h(i+ishift,j,:)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,J,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 elseif (G%mask2dCu(I,j+1)>0.) then
                   h_stack(:) = h(i+ishift,j+1,:)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,j,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 endif
               enddo
             else
@@ -4033,7 +4004,8 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src, scl_fac*segment%field(m)%dz_src(I,j,:), &
                        segment%field(m)%buffer_src(I,j,:), &
-                       GV%ke, h(i+ishift,j,:), segment%field(m)%buffer_dst(I,j,:))
+                       GV%ke, h(i+ishift,j,:), segment%field(m)%buffer_dst(I,j,:), &
+                       h_neglect, h_neglect_edge)
                 endif
               enddo
             endif
@@ -4052,19 +4024,22 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,J,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 elseif (G%mask2dCv(i,J)>0.) then
                   h_stack(:) = h(i,j+jshift,:)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,J,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 elseif (G%mask2dCv(i+1,J)>0.) then
                   h_stack(:) = h(i+1,j+jshift,:)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src,segment%field(m)%dz_src(I,J,:), &
                        segment%field(m)%buffer_src(I,J,:), &
-                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:))
+                       GV%ke, h_stack, segment%field(m)%buffer_dst(I,J,:), &
+                       h_neglect, h_neglect_edge)
                 endif
               enddo
             else
@@ -4079,7 +4054,8 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                   call remapping_core_h(OBC%remap_CS, &
                        segment%field(m)%nk_src, scl_fac*segment%field(m)%dz_src(i,J,:), &
                        segment%field(m)%buffer_src(i,J,:), &
-                       GV%ke, h(i,j+jshift,:), segment%field(m)%buffer_dst(i,J,:))
+                       GV%ke, h(i,j+jshift,:), segment%field(m)%buffer_dst(i,J,:), &
+                       h_neglect, h_neglect_edge)
                 endif
               enddo
             endif
@@ -4154,7 +4130,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
               enddo
             endif
             do k=1,GV%ke
-              segment%normal_vel(I,j,k) = US%m_s_to_L_T*(segment%field(m)%buffer_dst(I,j,k) + tidal_vel)
+              segment%normal_vel(I,j,k) = segment%field(m)%buffer_dst(I,j,k) + tidal_vel
               segment%normal_trans(I,j,k) = segment%normal_vel(I,j,k)*segment%h(I,j,k) * G%dyCu(I,j)
               normal_trans_bt(I,j) = normal_trans_bt(I,j) + segment%normal_trans(I,j,k)
             enddo
@@ -4175,7 +4151,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
               enddo
             endif
             do k=1,GV%ke
-              segment%normal_vel(i,J,k) = US%m_s_to_L_T*(segment%field(m)%buffer_dst(i,J,k) + tidal_vel)
+              segment%normal_vel(i,J,k) = segment%field(m)%buffer_dst(i,J,k) + tidal_vel
               segment%normal_trans(i,J,k) = segment%normal_vel(i,J,k)*segment%h(i,J,k) * &
                         G%dxCv(i,J)
               normal_trans_bt(i,J) = normal_trans_bt(i,J) + segment%normal_trans(i,J,k)
@@ -4197,7 +4173,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
               enddo
             endif
             do k=1,GV%ke
-              segment%tangential_vel(I,J,k) = US%m_s_to_L_T*(segment%field(m)%buffer_dst(I,J,k) + tidal_vel)
+              segment%tangential_vel(I,J,k) = segment%field(m)%buffer_dst(I,J,k) + tidal_vel
             enddo
             if (allocated(segment%nudged_tangential_vel)) &
               segment%nudged_tangential_vel(I,J,:) = segment%tangential_vel(I,J,:)
@@ -4215,7 +4191,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
               enddo
             endif
             do k=1,GV%ke
-              segment%tangential_vel(I,J,k) = US%m_s_to_L_T*(segment%field(m)%buffer_dst(I,J,k) + tidal_vel)
+              segment%tangential_vel(I,J,k) = segment%field(m)%buffer_dst(I,J,k) + tidal_vel
             enddo
             if (allocated(segment%nudged_tangential_vel)) &
               segment%nudged_tangential_vel(I,J,:) = segment%tangential_vel(I,J,:)
@@ -4226,7 +4202,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
         I=is_obc
         do J=js_obc,je_obc
           do k=1,GV%ke
-            segment%tangential_grad(I,J,k) = US%T_to_s*segment%field(m)%buffer_dst(I,J,k)
+            segment%tangential_grad(I,J,k) = segment%field(m)%buffer_dst(I,J,k)
             if (allocated(segment%nudged_tangential_grad)) &
               segment%nudged_tangential_grad(I,J,:) = segment%tangential_grad(I,J,:)
           enddo
@@ -4236,7 +4212,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
         J=js_obc
         do I=is_obc,ie_obc
           do k=1,GV%ke
-            segment%tangential_grad(I,J,k) = US%T_to_s*segment%field(m)%buffer_dst(I,J,k)
+            segment%tangential_grad(I,J,k) = segment%field(m)%buffer_dst(I,J,k)
             if (allocated(segment%nudged_tangential_grad)) &
               segment%nudged_tangential_grad(I,J,:) = segment%tangential_grad(I,J,:)
           enddo
@@ -4274,8 +4250,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                           + (OBC%tide_eq_phases(c) + OBC%tide_un(c)))
                 enddo
               endif
-              segment%eta(i,j) = GV%m_to_H * OBC%ramp_value &
-                * (segment%field(m)%buffer_dst(i,j,1) + tidal_elev)
+              segment%eta(i,j) = OBC%ramp_value * (segment%field(m)%buffer_dst(i,j,1) + tidal_elev)
             enddo
           enddo
         else
@@ -4289,7 +4264,7 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
                           + (OBC%tide_eq_phases(c) + OBC%tide_un(c)))
                 enddo
               endif
-              segment%eta(i,j) = GV%m_to_H * (segment%field(m)%buffer_dst(i,j,1) + tidal_elev)
+              segment%eta(i,j) = (segment%field(m)%buffer_dst(i,j,1) + tidal_elev)
             enddo
           enddo
         endif
@@ -4392,7 +4367,7 @@ subroutine register_OBC(name, param_file, Reg)
   if (Reg%nobc>=MAX_FIELDS_) then
     write(mesg,'("Increase MAX_FIELDS_ in MOM_memory.h to at least ",I3," to allow for &
         &all the open boundaries being registered via register_OBC.")') Reg%nobc+1
-    call MOM_error(FATAL,"MOM register_tracer: "//mesg)
+    call MOM_error(FATAL,"MOM register_OBC: "//mesg)
   endif
   Reg%nobc = Reg%nobc + 1
   nobc     = Reg%nobc
@@ -4413,7 +4388,6 @@ subroutine OBC_registry_init(param_file, Reg)
   integer, save :: init_calls = 0
 
 # include "version_variable.h"
-  character(len=40)  :: mdl = "MOM_open_boundary" ! This module's name.
   character(len=256) :: mesg    ! Message for error messages.
 
   if (.not.associated(Reg)) then ; allocate(Reg)
@@ -4472,7 +4446,7 @@ subroutine segment_tracer_registry_init(param_file, segment)
 ! This include declares and sets the variable "version".
 # include "version_variable.h"
   character(len=40)  :: mdl = "segment_tracer_registry_init" ! This routine's name.
-  character(len=256) :: mesg    ! Message for error messages.
+  !character(len=256) :: mesg    ! Message for error messages.
 
   if (.not.associated(segment%tr_Reg)) then
     allocate(segment%tr_Reg)
@@ -4497,7 +4471,7 @@ end subroutine segment_tracer_registry_init
 !> Register a tracer array that is active on an OBC segment, potentially also specifying how the
 !! tracer inflow values are specified.
 subroutine register_segment_tracer(tr_ptr, param_file, GV, segment, &
-                                   OBC_scalar, OBC_array)
+                                   OBC_scalar, OBC_array, scale)
   type(verticalGrid_type), intent(in)   :: GV         !< ocean vertical grid structure
   type(tracer_type), target             :: tr_ptr     !< A target that can be used to set a pointer to the
                                                       !! stored value of tr. This target must be
@@ -4506,18 +4480,20 @@ subroutine register_segment_tracer(tr_ptr, param_file, GV, segment, &
                                                       !! but it also means that any updates to this
                                                       !! structure in the calling module will be
                                                       !! available subsequently to the tracer registry.
-  type(param_file_type), intent(in)     :: param_file !< file to parse for model parameter values
+  type(param_file_type),  intent(in)    :: param_file !< file to parse for model parameter values
   type(OBC_segment_type), intent(inout) :: segment    !< current segment data structure
-  real, optional, intent(in)            :: OBC_scalar !< If present, use scalar value for segment tracer
+  real,         optional, intent(in)    :: OBC_scalar !< If present, use scalar value for segment tracer
+                                                      !! inflow concentration, including any rescaling to
+                                                      !! put the tracer concentration into its internal units.
+  logical,      optional, intent(in)    :: OBC_array  !< If true, use array values for segment tracer
                                                       !! inflow concentration.
-  logical, optional, intent(in)         :: OBC_array  !< If true, use array values for segment tracer
-                                                      !! inflow concentration.
-
+  real,         optional, intent(in)    :: scale      !< A scaling factor that should be used with any
+                                                      !! data that is read in, to convert it to the internal
+                                                      !! units of this tracer.
 
 ! Local variables
-  integer :: ntseg
-  integer :: isd, ied, jsd, jed
-  integer :: IsdB, IedB, JsdB, JedB
+  real :: rescale ! A multiplicative correction to the scaling factor.
+  integer :: ntseg, m, isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB
   character(len=256) :: mesg    ! Message for error messages.
 
   call segment_tracer_registry_init(param_file, segment)
@@ -4537,6 +4513,24 @@ subroutine register_segment_tracer(tr_ptr, param_file, GV, segment, &
 
   segment%tr_Reg%Tr(ntseg)%Tr => tr_ptr
   segment%tr_Reg%Tr(ntseg)%name = tr_ptr%name
+
+  segment%tr_Reg%Tr(ntseg)%scale = 1.0
+  if (present(scale)) then
+    segment%tr_Reg%Tr(ntseg)%scale = scale
+    do m=1,segment%num_fields
+      ! Store the scaling factor for fields with exactly matching names, and possibly
+      ! rescale the previously stonred input values.
+      if (trim(segment%field(m)%name) == trim(segment%tr_Reg%Tr(ntseg)%name)) then
+        if (segment%field(m)%fid == -1) then
+          rescale = scale
+          if ((segment%field(m)%scale /= 0.0) .and. (segment%field(m)%scale /= 1.0)) &
+            rescale = scale / segment%field(m)%scale
+          segment%field(m)%value = rescale * segment%field(m)%value
+        endif
+        segment%field(m)%scale = scale
+      endif
+    enddo
+  endif
 
   if (segment%tr_Reg%locked) call MOM_error(FATAL, &
       "MOM register_segment_tracer was called for variable "//trim(segment%tr_Reg%Tr(ntseg)%name)//&
@@ -4572,18 +4566,18 @@ subroutine segment_tracer_registry_end(Reg)
   endif
 end subroutine segment_tracer_registry_end
 
-subroutine register_temp_salt_segments(GV, OBC, tr_Reg, param_file)
+subroutine register_temp_salt_segments(GV, US, OBC, tr_Reg, param_file)
   type(verticalGrid_type),    intent(in)    :: GV         !< ocean vertical grid structure
+  type(unit_scale_type),      intent(in)    :: US         !< Unit scaling type
   type(ocean_OBC_type),       pointer       :: OBC        !< Open boundary structure
   type(tracer_registry_type), pointer       :: tr_Reg     !< Tracer registry
   type(param_file_type),      intent(in)    :: param_file !< file to parse for  model parameter values
 
 ! Local variables
-  integer :: isd, ied, IsdB, IedB, jsd, jed, JsdB, JedB, nz, nf
-  integer :: i, j, k, n
-  character(len=32)  :: name
+  integer :: n
+  character(len=32) :: name
   type(OBC_segment_type), pointer :: segment => NULL() ! pointer to segment type list
-  type(tracer_type), pointer      :: tr_ptr => NULL()
+  type(tracer_type), pointer :: tr_ptr => NULL()
 
   if (.not. associated(OBC)) return
 
@@ -4597,18 +4591,19 @@ subroutine register_temp_salt_segments(GV, OBC, tr_Reg, param_file)
     name = 'temp'
     call tracer_name_lookup(tr_Reg, tr_ptr, name)
     call register_segment_tracer(tr_ptr, param_file, GV, segment, &
-                                 OBC_array=segment%temp_segment_data_exists)
+                                 OBC_array=segment%temp_segment_data_exists, scale=US%degC_to_C)
     name = 'salt'
     call tracer_name_lookup(tr_Reg, tr_ptr, name)
     call register_segment_tracer(tr_ptr, param_file, GV, segment, &
-                                 OBC_array=segment%salt_segment_data_exists)
+                                 OBC_array=segment%salt_segment_data_exists, scale=US%ppt_to_S)
   enddo
 
 end subroutine register_temp_salt_segments
 
-subroutine fill_temp_salt_segments(G, GV, OBC, tv)
+subroutine fill_temp_salt_segments(G, GV, US, OBC, tv)
   type(ocean_grid_type),   intent(in)    :: G   !< Ocean grid structure
   type(verticalGrid_type), intent(in)    :: GV  !< ocean vertical grid structure
+  type(unit_scale_type),   intent(in)    :: US  !< Unit scaling
   type(ocean_OBC_type),    pointer       :: OBC !< Open boundary structure
   type(thermo_var_ptrs),   intent(inout) :: tv  !< Thermodynamics structure
 
@@ -4675,14 +4670,12 @@ subroutine mask_outside_OBCs(G, US, param_file, OBC)
   type(unit_scale_type),        intent(in)    :: US         !< A dimensional unit scaling type
 
   ! Local variables
-  integer :: isd, ied, IsdB, IedB, jsd, jed, JsdB, JedB, n
   integer :: i, j
   integer :: l_seg
   logical :: fatal_error = .False.
   real    :: min_depth ! The minimum depth for ocean points [Z ~> m]
   integer, parameter :: cin = 3, cout = 4, cland = -1, cedge = -2
   character(len=256) :: mesg    ! Message for error messages.
-  type(OBC_segment_type), pointer :: segment => NULL() ! pointer to segment type list
   real, allocatable, dimension(:,:) :: color, color2  ! For sorting inside from outside,
                                                       ! two different ways
 
@@ -4777,8 +4770,8 @@ subroutine mask_outside_OBCs(G, US, param_file, OBC)
     if (color(i,j) /= color2(i,j)) then
       fatal_error = .True.
       write(mesg,'("MOM_open_boundary: problem with OBC segments specification at ",I5,",",I5," during\n", &
-          "the masking of the outside grid points.")') i, j
-      call MOM_error(WARNING,"MOM register_tracer: "//mesg, all_print=.true.)
+          &"the masking of the outside grid points.")') i, j
+      call MOM_error(WARNING,"MOM mask_outside_OBCs: "//mesg, all_print=.true.)
     endif
     if (color(i,j) == cout) G%bathyT(i,j) = min_depth
   enddo ; enddo
@@ -4910,10 +4903,11 @@ subroutine flood_fill2(G, color, cin, cout, cland)
 end subroutine flood_fill2
 
 !> Register OBC segment data for restarts
-subroutine open_boundary_register_restarts(HI, GV, OBC, Reg, param_file, restart_CS, &
+subroutine open_boundary_register_restarts(HI, GV, US, OBC, Reg, param_file, restart_CS, &
                                            use_temperature)
   type(hor_index_type),    intent(in) :: HI !< Horizontal indices
   type(verticalGrid_type), pointer    :: GV !< Container for vertical grid information
+  type(unit_scale_type),   intent(in) :: US  !< A dimensional unit scaling type
   type(ocean_OBC_type),    pointer    :: OBC !< OBC data structure, data intent(inout)
   type(tracer_registry_type), pointer :: Reg !< pointer to tracer registry
   type(param_file_type),   intent(in) :: param_file !< Parameter file handle
@@ -4921,26 +4915,31 @@ subroutine open_boundary_register_restarts(HI, GV, OBC, Reg, param_file, restart
   logical,                 intent(in) :: use_temperature !< If true, T and S are used
   ! Local variables
   type(vardesc) :: vd(2)
-  integer       :: m, n
-  character(len=100) :: mesg
-  type(OBC_segment_type), pointer :: segment=>NULL()
+  integer       :: m
+  character(len=100) :: mesg, var_name
 
   if (.not. associated(OBC)) &
     call MOM_error(FATAL, "open_boundary_register_restarts: Called with "//&
                       "uninitialized OBC control structure")
 
-  ! *** This is a temporary work around for restarts with OBC segments.
+  ! ### This is a temporary work around for restarts with OBC segments.
   ! This implementation uses 3D arrays solely for restarts. We need
   ! to be able to add 2D ( x,z or y,z ) data to restarts to avoid using
-  ! so much memory and disk space. ***
+  ! so much memory and disk space.
   if (OBC%radiation_BCs_exist_globally) then
     allocate(OBC%rx_normal(HI%isdB:HI%iedB,HI%jsd:HI%jed,GV%ke), source=0.0)
     allocate(OBC%ry_normal(HI%isd:HI%ied,HI%jsdB:HI%jedB,GV%ke), source=0.0)
 
-    vd(1) = var_desc("rx_normal", "m s-1", "Normal Phase Speed for EW radiation OBCs", 'u', 'L')
-    vd(2) = var_desc("ry_normal", "m s-1", "Normal Phase Speed for NS radiation OBCs", 'v', 'L')
-    call register_restart_pair(OBC%rx_normal, OBC%ry_normal, vd(1), vd(2), &
-        .false., restart_CS)
+    vd(1) = var_desc("rx_normal", "gridpoint timestep-1", "Normal Phase Speed for EW radiation OBCs", 'u', 'L')
+    vd(2) = var_desc("ry_normal", "gridpoint timestep-1", "Normal Phase Speed for NS radiation OBCs", 'v', 'L')
+    call register_restart_pair(OBC%rx_normal, OBC%ry_normal, vd(1), vd(2), .false., restart_CS)
+    ! The rx_normal and ry_normal arrays used with radiation OBCs are currently in units of grid
+    ! points per timestep, but if this were to be corrected to [L T-1 ~> m s-1] or [T-1 ~> s-1] to
+    ! permit timesteps to change between calls to the OBC code, the following would be needed instead:
+    ! vd(1) = var_desc("rx_normal", "m s-1", "Normal Phase Speed for EW radiation OBCs", 'u', 'L')
+    ! vd(2) = var_desc("ry_normal", "m s-1", "Normal Phase Speed for NS radiation OBCs", 'v', 'L')
+    ! call register_restart_pair(OBC%rx_normal, OBC%ry_normal, vd(1), vd(2), .false., restart_CS, &
+    !                            conversion=US%L_T_to_m_s)
   endif
 
   if (OBC%oblique_BCs_exist_globally) then
@@ -4949,12 +4948,13 @@ subroutine open_boundary_register_restarts(HI, GV, OBC, Reg, param_file, restart
 
     vd(1) = var_desc("rx_oblique", "m2 s-2", "Radiation Speed Squared for EW oblique OBCs", 'u', 'L')
     vd(2) = var_desc("ry_oblique", "m2 s-2", "Radiation Speed Squared for NS oblique OBCs", 'v', 'L')
-    call register_restart_pair(OBC%rx_oblique, OBC%ry_oblique, vd(1), vd(2), &
-        .false., restart_CS)
+    call register_restart_pair(OBC%rx_oblique, OBC%ry_oblique, vd(1), vd(2), .false., &
+                               restart_CS, conversion=US%L_T_to_m_s**2)
 
     allocate(OBC%cff_normal(HI%IsdB:HI%IedB,HI%jsdB:HI%jedB,GV%ke), source=0.0)
-    vd(1) = var_desc("cff_normal", "m2 s-2", "denominator for oblique OBCs", 'q', 'L')
-    call register_restart_field(OBC%cff_normal, vd(1), .false., restart_CS)
+    call register_restart_field(OBC%cff_normal, "cff_normal", .false., restart_CS, &
+             longname="denominator for oblique OBCs", &
+             units="m2 s-2", conversion=US%L_T_to_m_s**2, hor_grid="q")
   endif
 
   if (Reg%ntr == 0) return
@@ -4978,13 +4978,13 @@ subroutine open_boundary_register_restarts(HI, GV, OBC, Reg, param_file, restart
     do m=1,OBC%ntr
       if (OBC%tracer_x_reservoirs_used(m)) then
         if (modulo(HI%turns, 2) /= 0) then
-          write(mesg,'("tres_y_",I3.3)') m
-          vd(1) = var_desc(mesg,"Conc", "Tracer concentration for NS OBCs",'v','L')
-          call register_restart_field(OBC%tres_x(:,:,:,m), vd(1), .false., restart_CS)
+          write(var_name,'("tres_y_",I3.3)') m
+          call register_restart_field(OBC%tres_x(:,:,:,m), var_name, .false., restart_CS, &
+                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v')
         else
-          write(mesg,'("tres_x_",I3.3)') m
-          vd(1) = var_desc(mesg,"Conc", "Tracer concentration for EW OBCs",'u','L')
-          call register_restart_field(OBC%tres_x(:,:,:,m), vd(1), .false., restart_CS)
+          write(var_name,'("tres_x_",I3.3)') m
+          call register_restart_field(OBC%tres_x(:,:,:,m), var_name, .false., restart_CS, &
+                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u')
         endif
       endif
     enddo
@@ -4994,13 +4994,13 @@ subroutine open_boundary_register_restarts(HI, GV, OBC, Reg, param_file, restart
     do m=1,OBC%ntr
       if (OBC%tracer_y_reservoirs_used(m)) then
         if (modulo(HI%turns, 2) /= 0) then
-          write(mesg,'("tres_x_",I3.3)') m
-          vd(1) = var_desc(mesg,"Conc", "Tracer concentration for EW OBCs",'u','L')
-          call register_restart_field(OBC%tres_y(:,:,:,m), vd(1), .false., restart_CS)
+          write(var_name,'("tres_x_",I3.3)') m
+          call register_restart_field(OBC%tres_y(:,:,:,m), var_name, .false., restart_CS, &
+                   longname="Tracer concentration for EW OBCs", units="Conc", hor_grid='u')
         else
-          write(mesg,'("tres_y_",I3.3)') m
-          vd(1) = var_desc(mesg,"Conc", "Tracer concentration for NS OBCs",'v','L')
-          call register_restart_field(OBC%tres_y(:,:,:,m), vd(1), .false., restart_CS)
+          write(var_name,'("tres_y_",I3.3)') m
+          call register_restart_field(OBC%tres_y(:,:,:,m), var_name, .false., restart_CS, &
+                   longname="Tracer concentration for NS OBCs", units="Conc", hor_grid='v')
         endif
       endif
     enddo
@@ -5025,6 +5025,8 @@ subroutine update_segment_tracer_reservoirs(G, GV, uhr, vhr, h, OBC, dt, Reg)
   real :: u_L_in, u_L_out ! The zonal distance moved in or out of a cell [L ~> m]
   real :: v_L_in, v_L_out ! The meridional distance moved in or out of a cell [L ~> m]
   real :: fac1            ! The denominator of the expression for tracer updates [nondim]
+  real :: I_scale         ! The inverse of the scaling factor for the tracers.
+                          ! For salinity the units would be [ppt S-1 ~> 1]
   integer :: i, j, k, m, n, ntr, nz
   integer :: ishift, idir, jshift, jdir
 
@@ -5046,17 +5048,20 @@ subroutine update_segment_tracer_reservoirs(G, GV, uhr, vhr, h, OBC, dt, Reg)
         ! Can keep this or take it out, either way
         if (G%mask2dT(I+ishift,j) == 0.0) cycle
         ! Update the reservoir tracer concentration implicitly using a Backward-Euler timestep
-        do m=1,ntr ; if (allocated(segment%tr_Reg%Tr(m)%tres)) then ; do k=1,nz
-          u_L_out = max(0.0, (idir*uhr(I,j,k))*segment%Tr_InvLscale_out / &
-                    ((h(i+ishift,j,k) + GV%H_subroundoff)*G%dyCu(I,j)))
-          u_L_in  = min(0.0, (idir*uhr(I,j,k))*segment%Tr_InvLscale_in  / &
-                    ((h(i+ishift,j,k) + GV%H_subroundoff)*G%dyCu(I,j)))
-          fac1 = 1.0 + (u_L_out-u_L_in)
-          segment%tr_Reg%Tr(m)%tres(I,j,k) = (1.0/fac1)*(segment%tr_Reg%Tr(m)%tres(I,j,k) + &
-                            (u_L_out*Reg%Tr(m)%t(I+ishift,j,k) - &
-                             u_L_in*segment%tr_Reg%Tr(m)%t(I,j,k)))
-          if (allocated(OBC%tres_x)) OBC%tres_x(I,j,k,m) = segment%tr_Reg%Tr(m)%tres(I,j,k)
-        enddo ; endif ; enddo
+        do m=1,ntr
+          I_scale = 1.0 ; if (segment%tr_Reg%Tr(m)%scale /= 0.0) I_scale = 1.0 / segment%tr_Reg%Tr(m)%scale
+          if (allocated(segment%tr_Reg%Tr(m)%tres)) then ; do k=1,nz
+            u_L_out = max(0.0, (idir*uhr(I,j,k))*segment%Tr_InvLscale_out / &
+                      ((h(i+ishift,j,k) + GV%H_subroundoff)*G%dyCu(I,j)))
+            u_L_in  = min(0.0, (idir*uhr(I,j,k))*segment%Tr_InvLscale_in  / &
+                      ((h(i+ishift,j,k) + GV%H_subroundoff)*G%dyCu(I,j)))
+            fac1 = 1.0 + (u_L_out-u_L_in)
+            segment%tr_Reg%Tr(m)%tres(I,j,k) = (1.0/fac1)*(segment%tr_Reg%Tr(m)%tres(I,j,k) + &
+                              (u_L_out*Reg%Tr(m)%t(I+ishift,j,k) - &
+                               u_L_in*segment%tr_Reg%Tr(m)%t(I,j,k)))
+            if (allocated(OBC%tres_x)) OBC%tres_x(I,j,k,m) = I_scale * segment%tr_Reg%Tr(m)%tres(I,j,k)
+          enddo ; endif
+        enddo
       enddo
     elseif (segment%is_N_or_S) then
       J = segment%HI%JsdB
@@ -5071,17 +5076,20 @@ subroutine update_segment_tracer_reservoirs(G, GV, uhr, vhr, h, OBC, dt, Reg)
         ! Can keep this or take it out, either way
         if (G%mask2dT(i,j+jshift) == 0.0) cycle
         ! Update the reservoir tracer concentration implicitly using a Backward-Euler timestep
-        do m=1,ntr ; if (allocated(segment%tr_Reg%Tr(m)%tres)) then ; do k=1,nz
-          v_L_out = max(0.0, (jdir*vhr(i,J,k))*segment%Tr_InvLscale_out / &
-                    ((h(i,j+jshift,k) + GV%H_subroundoff)*G%dxCv(i,J)))
-          v_L_in  = min(0.0, (jdir*vhr(i,J,k))*segment%Tr_InvLscale_in  / &
-                    ((h(i,j+jshift,k) + GV%H_subroundoff)*G%dxCv(i,J)))
-          fac1 = 1.0 + (v_L_out-v_L_in)
-          segment%tr_Reg%Tr(m)%tres(i,J,k) = (1.0/fac1)*(segment%tr_Reg%Tr(m)%tres(i,J,k) + &
-                            (v_L_out*Reg%Tr(m)%t(i,J+jshift,k) - &
-                             v_L_in*segment%tr_Reg%Tr(m)%t(i,J,k)))
-          if (allocated(OBC%tres_y)) OBC%tres_y(i,J,k,m) = segment%tr_Reg%Tr(m)%tres(i,J,k)
-        enddo ; endif ; enddo
+        do m=1,ntr
+          I_scale = 1.0 ; if (segment%tr_Reg%Tr(m)%scale /= 0.0) I_scale = 1.0 / segment%tr_Reg%Tr(m)%scale
+          if (allocated(segment%tr_Reg%Tr(m)%tres)) then ; do k=1,nz
+            v_L_out = max(0.0, (jdir*vhr(i,J,k))*segment%Tr_InvLscale_out / &
+                      ((h(i,j+jshift,k) + GV%H_subroundoff)*G%dxCv(i,J)))
+            v_L_in  = min(0.0, (jdir*vhr(i,J,k))*segment%Tr_InvLscale_in  / &
+                      ((h(i,j+jshift,k) + GV%H_subroundoff)*G%dxCv(i,J)))
+            fac1 = 1.0 + (v_L_out-v_L_in)
+            segment%tr_Reg%Tr(m)%tres(i,J,k) = (1.0/fac1)*(segment%tr_Reg%Tr(m)%tres(i,J,k) + &
+                              (v_L_out*Reg%Tr(m)%t(i,J+jshift,k) - &
+                               v_L_in*segment%tr_Reg%Tr(m)%t(i,J,k)))
+            if (allocated(OBC%tres_y)) OBC%tres_y(i,J,k,m) = I_scale * segment%tr_Reg%Tr(m)%tres(i,J,k)
+          enddo ; endif
+        enddo
       enddo
     endif
   enddo ; endif ; endif
@@ -5104,11 +5112,10 @@ subroutine adjustSegmentEtaToFitBathymetry(G, GV, US, segment,fld)
   integer,                 intent(in)    :: fld  !< field index to adjust thickness
 
   integer :: i, j, k, is, ie, js, je, nz, contractions, dilations
-  integer :: n
   real, allocatable, dimension(:,:,:) :: eta ! Segment source data interface heights [Z ~> m]
   real :: hTolerance = 0.1 !<  Tolerance to exceed adjustment criteria [Z ~> m]
   ! real :: dilate      ! A factor by which to dilate the water column [nondim]
-  character(len=100) :: mesg
+  !character(len=100) :: mesg
 
   hTolerance = 0.1*US%m_to_Z
 
@@ -5429,7 +5436,7 @@ subroutine rotate_OBC_init(OBC_in, G, GV, US, param_file, tv, restart_CS, OBC)
   enddo
 
   if (use_temperature) &
-    call fill_temp_salt_segments(G, GV, OBC, tv)
+    call fill_temp_salt_segments(G, GV, US, OBC, tv)
 
   call open_boundary_init(G, GV, US, param_file, OBC, restart_CS)
 end subroutine rotate_OBC_init
@@ -5442,7 +5449,6 @@ subroutine rotate_OBC_segment_data(segment_in, segment, turns)
   integer, intent(in) :: turns
 
   integer :: n
-  integer :: is, ie, js, je, nk
   integer :: num_fields
 
 

@@ -6,7 +6,6 @@ module MOM_tidal_mixing
 use MOM_diag_mediator,      only : diag_ctrl, time_type, register_diag_field
 use MOM_diag_mediator,      only : safe_alloc_ptr, post_data
 use MOM_debugging,          only : hchksum
-use MOM_EOS,                only : calculate_density
 use MOM_error_handler,      only : MOM_error, is_root_pe, FATAL, WARNING, NOTE
 use MOM_file_parser,        only : openParameterBlock, closeParameterBlock
 use MOM_file_parser,        only : get_param, log_param, log_version, param_file_type
@@ -597,12 +596,15 @@ logical function tidal_mixing_init(Time, G, GV, US, param_file, int_tide_CSp, di
       CS%id_N2_int = register_diag_field('ocean_model','N2_int',diag%axesTi,Time, &
           'Bouyancy frequency squared, at interfaces', 's-2', conversion=US%s_to_T**2)
       !> TODO: add units
-      CS%id_Simmons_coeff = register_diag_field('ocean_model','Simmons_coeff',diag%axesT1,Time, &
-           'time-invariant portion of the tidal mixing coefficient using the Simmons', '')
-      CS%id_Schmittner_coeff = register_diag_field('ocean_model','Schmittner_coeff',diag%axesTL,Time, &
-           'time-invariant portion of the tidal mixing coefficient using the Schmittner', '')
-      CS%id_tidal_qe_md = register_diag_field('ocean_model','tidal_qe_md',diag%axesTL,Time, &
-           'input tidal energy dissipated locally interpolated to model vertical coordinates', '')
+      if (CS%CVMix_tidal_scheme .eq. SIMMONS) then
+        CS%id_Simmons_coeff = register_diag_field('ocean_model','Simmons_coeff',diag%axesT1,Time, &
+             'time-invariant portion of the tidal mixing coefficient using the Simmons', '')
+      else if (CS%CVMix_tidal_scheme .eq. SCHMITTNER) then
+        CS%id_Schmittner_coeff = register_diag_field('ocean_model','Schmittner_coeff',diag%axesTL,Time, &
+             'time-invariant portion of the tidal mixing coefficient using the Schmittner', '')
+        CS%id_tidal_qe_md = register_diag_field('ocean_model','tidal_qe_md',diag%axesTL,Time, &
+             'input tidal energy dissipated locally interpolated to model vertical coordinates', '')
+      endif
       CS%id_vert_dep = register_diag_field('ocean_model','vert_dep',diag%axesTi,Time, &
            'vertical deposition function needed for Simmons et al tidal  mixing', '')
 
@@ -875,7 +877,7 @@ subroutine calculate_CVMix_tidal(h, j, N2_int, G, GV, US, CS, Kv, Kd_lay, Kd_int
       ! remap from input z coordinate to model coordinate:
       tidal_qe_md = 0.0
       call remapping_core_h(CS%remap_cs, size(CS%h_src), CS%h_src, CS%tidal_qe_3d_in(i,j,:), &
-                            GV%ke, h_m, tidal_qe_md)
+                            GV%ke, h_m, tidal_qe_md, GV%H_subroundoff, GV%H_subroundoff)
 
       ! form the Schmittner coefficient that is based on 3D q*E, which is formed from
       ! summing q_i*TidalConstituent_i over the number of constituents.
@@ -1026,9 +1028,7 @@ subroutine add_int_tide_diffusivity(h, j, N2_bot, N2_lay, TKE_to_Kd, max_TKE, &
   real :: TKE_lowmode_tot ! TKE from all low modes [R Z3 T-3 ~> W m-2] (BDM)
 
   logical :: use_Polzin, use_Simmons
-  character(len=160) :: mesg  ! The text of an error message
   integer :: i, k, is, ie, nz
-  integer :: a, fr, m
 
   is = G%isc ; ie = G%iec ; nz = GV%ke
 

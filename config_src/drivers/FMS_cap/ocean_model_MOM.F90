@@ -276,7 +276,7 @@ subroutine ocean_model_init(Ocean_sfc, OS, Time_init, Time_in, wind_stagger, gas
   OS%Time = Time_in ; OS%Time_dyn = Time_in
   call initialize_MOM(OS%Time, Time_init, param_file, OS%dirs, OS%MOM_CSp, &
                       OS%restart_CSp, Time_in, offline_tracer_mode=OS%offline_tracer_mode, &
-                      diag_ptr=OS%diag, count_calls=.true.)
+                      diag_ptr=OS%diag, count_calls=.true., waves_CSp=OS%Waves)
   call get_MOM_state_elements(OS%MOM_CSp, G=OS%grid, GV=OS%GV, US=OS%US, C_p=OS%C_p, &
                               C_p_scaled=OS%fluxes%C_p, use_temp=use_temperature)
 
@@ -1001,7 +1001,7 @@ subroutine Ocean_stock_pe(OS, index, value, time_index)
     case (ISTOCK_HEAT)  ! Return the heat content of the ocean in J.
       call get_ocean_stocks(OS%MOM_CSp, heat=value, on_PE_only=.true.)
     case (ISTOCK_SALT)  ! Return the mass of the salt in the ocean in kg.
-       call get_ocean_stocks(OS%MOM_CSp, salt=value, on_PE_only=.true.)
+      call get_ocean_stocks(OS%MOM_CSp, salt=value, on_PE_only=.true.)
     case default ; value = 0.0
   end select
   ! If the FMS coupler is changed so that Ocean_stock_PE is only called on

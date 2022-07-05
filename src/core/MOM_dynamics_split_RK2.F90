@@ -67,7 +67,7 @@ use MOM_vert_friction,         only : vertvisc_init, vertvisc_end, vertvisc_CS
 use MOM_vert_friction,         only : updateCFLtruncationValue
 use MOM_verticalGrid,          only : verticalGrid_type, get_thickness_units
 use MOM_verticalGrid,          only : get_flux_units, get_tr_flux_units
-use MOM_wave_interface, only: wave_parameters_CS
+use MOM_wave_interface,        only: wave_parameters_CS, Stokes_PGF
 
 implicit none ; private
 
@@ -78,11 +78,13 @@ type, public :: MOM_dyn_split_RK2_CS ; private
   real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) :: &
     CAu, &    !< CAu = f*v - u.grad(u) [L T-2 ~> m s-2]
     PFu, &    !< PFu = -dM/dx [L T-2 ~> m s-2]
+    PFu_Stokes, & !< PFu_Stokes = -d/dx int_r (u_L*duS/dr) [L T-2 ~> m s-2]
     diffu     !< Zonal acceleration due to convergence of the along-isopycnal stress tensor [L T-2 ~> m s-2]
 
   real ALLOCABLE_, dimension(NIMEM_,NJMEMB_PTR_,NKMEM_) :: &
     CAv, &    !< CAv = -f*u - u.grad(v) [L T-2 ~> m s-2]
     PFv, &    !< PFv = -dM/dy [L T-2 ~> m s-2]
+    PFv_Stokes, & !< PFv_Stokes = -d/dy int_r (v_L*dvS/dr) [L T-2 ~> m s-2]
     diffv     !< Meridional acceleration due to convergence of the along-isopycnal stress tensor [L T-2 ~> m s-2]
 
   real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) :: visc_rem_u
@@ -177,6 +179,7 @@ type, public :: MOM_dyn_split_RK2_CS ; private
   integer :: id_hf_CAu_2d = -1, id_hf_CAv_2d = -1
   integer :: id_intz_CAu_2d = -1, id_intz_CAv_2d = -1
   integer :: id_CAu_visc_rem = -1, id_CAv_visc_rem = -1
+  integer :: id_deta_dt = -1
 
   ! Split scheme only.
   integer :: id_uav        = -1, id_vav        = -1
@@ -315,6 +318,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
     ! obtained using the initial velocities [H L2 T-1 ~> m3 s-1 or kg s-1].
 
   real, dimension(SZI_(G),SZJ_(G)) :: eta_pred
+  real, dimension(SZI_(G),SZJ_(G)) :: deta_dt
     ! eta_pred is the predictor value of the free surface height or column mass,
     ! [H ~> m or kg m-2].
 
@@ -347,19 +351,24 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
     h_av    ! The layer thickness time-averaged over a time step [H ~> m or kg m-2].
 
   real :: dt_pred   ! The time step for the predictor part of the baroclinic time stepping [T ~> s].
+  real :: Idt_bc    ! Inverse of the baroclinic timestep
 
   logical :: dyn_p_surf
   logical :: BT_cont_BT_thick ! If true, use the BT_cont_type to estimate the
                               ! relative weightings of the layers in calculating
                               ! the barotropic accelerations.
+  logical :: Use_Stokes_PGF ! If true, add Stokes PGF to hydrostatic PGF
   !---For group halo pass
   logical :: showCallTree, sym
 
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
   integer :: cont_stencil
+
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
   u_av => CS%u_av ; v_av => CS%v_av ; h_av => CS%h_av ; eta => CS%eta
+
+  Idt_bc = 1./dt
 
   sym=.false.;if (G%Domain%symmetric) sym=.true.  ! switch to include symmetric domain in checksums
 
@@ -446,6 +455,31 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
       eta_PF_start(i,j) = CS%eta_PF(i,j) - pres_to_eta * (p_surf_begin(i,j) - p_surf_end(i,j))
     enddo ; enddo
   endif
+  ! Stokes shear force contribution to pressure gradient
+  Use_Stokes_PGF = present(Waves)
+  if (Use_Stokes_PGF) then
+    Use_Stokes_PGF = associated(Waves)
+    if (Use_Stokes_PGF) Use_Stokes_PGF = Waves%Stokes_PGF
+    if (Use_Stokes_PGF) then
+      call Stokes_PGF(G, GV, h, u, v, CS%PFu_Stokes, CS%PFv_Stokes, Waves)
+
+      ! We are adding Stokes_PGF to hydrostatic PGF here.  The diag PFu/PFv
+      ! will therefore report the sum total PGF and we avoid other
+      ! modifications in the code.  The PFu_Stokes is output within the waves routines.
+      if (.not.Waves%Passive_Stokes_PGF) then
+        do k=1,nz
+          do j=js,je ; do I=Isq,Ieq
+            CS%PFu(I,j,k) = CS%PFu(I,j,k) + CS%PFu_Stokes(I,j,k)
+          enddo ; enddo
+        enddo
+        do k=1,nz
+          do J=Jsq,Jeq ; do i=is,ie
+             CS%PFv(i,J,k) = CS%PFv(i,J,k) + CS%PFv_Stokes(i,J,k)
+          enddo ; enddo
+        enddo
+      endif
+    endif
+  endif
   call cpu_clock_end(id_clock_pres)
   call disable_averaging(CS%diag)
   if (showCallTree) call callTree_wayPoint("done with PressureForce (step_MOM_dyn_split_RK2)")
@@ -462,7 +496,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
 ! CAu = -(f+zeta_av)/h_av vh + d/dx KE_av
   call cpu_clock_begin(id_clock_Cor)
   call CorAdCalc(u_av, v_av, h_av, uh, vh, CS%CAu, CS%CAv, CS%OBC, CS%ADp, &
-                 G, Gv, US, CS%CoriolisAdv, pbv)
+                 G, Gv, US, CS%CoriolisAdv, pbv, Waves=Waves)
   call cpu_clock_end(id_clock_Cor)
   if (showCallTree) call callTree_wayPoint("done with CorAdCalc (step_MOM_dyn_split_RK2)")
 
@@ -681,6 +715,27 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
     call cpu_clock_begin(id_clock_pres)
     call PressureForce(hp, tv, CS%PFu, CS%PFv, G, GV, US, CS%PressureForce_CSp, &
                        CS%ALE_CSp, p_surf, CS%pbce, CS%eta_PF)
+    ! Stokes shear force contribution to pressure gradient
+    Use_Stokes_PGF = present(Waves)
+    if (Use_Stokes_PGF) then
+      Use_Stokes_PGF = associated(Waves)
+      if (Use_Stokes_PGF) Use_Stokes_PGF = Waves%Stokes_PGF
+      if (Use_Stokes_PGF) then
+        call Stokes_PGF(G, GV, h, u, v, CS%PFu_Stokes, CS%PFv_Stokes, Waves)
+        if (.not.Waves%Passive_Stokes_PGF) then
+          do k=1,nz
+            do j=js,je ; do I=Isq,Ieq
+              CS%PFu(I,j,k) = CS%PFu(I,j,k) + CS%PFu_Stokes(I,j,k)
+            enddo ; enddo
+          enddo
+          do k=1,nz
+            do J=Jsq,Jeq ; do i=is,ie
+              CS%PFv(i,J,k) = CS%PFv(i,J,k) + CS%PFv_Stokes(i,J,k)
+            enddo ; enddo
+          enddo
+        endif
+      endif
+    endif
     call cpu_clock_end(id_clock_pres)
     if (showCallTree) call callTree_wayPoint("done with PressureForce[hp=(1-b).h+b.h] (step_MOM_dyn_split_RK2)")
   endif
@@ -715,7 +770,7 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
 ! CAu = -(f+zeta_av)/h_av vh + d/dx KE_av
   call cpu_clock_begin(id_clock_Cor)
   call CorAdCalc(u_av, v_av, h_av, uh, vh, CS%CAu, CS%CAv, CS%OBC, CS%ADp, &
-                 G, GV, US, CS%CoriolisAdv, pbv)
+                 G, GV, US, CS%CoriolisAdv, pbv, Waves=Waves)
   call cpu_clock_end(id_clock_Cor)
   if (showCallTree) call callTree_wayPoint("done with CorAdCalc (step_MOM_dyn_split_RK2)")
 
@@ -760,6 +815,9 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
               CS%u_accel_bt, CS%v_accel_bt, eta_pred, CS%uhbt, CS%vhbt, G, GV, US, &
               CS%barotropic_CSp, CS%visc_rem_u, CS%visc_rem_v, CS%ADp, CS%OBC, CS%BT_cont, &
               eta_PF_start, taux_bot, tauy_bot, uh_ptr, vh_ptr, u_ptr, v_ptr, etaav=eta_av)
+  if (CS%id_deta_dt>0) then
+    do j=js,je ; do i=is,ie ; deta_dt(i,j) = (eta_pred(i,j) - eta(i,j))*Idt_bc ; enddo ; enddo
+  endif
   do j=js,je ; do i=is,ie ; eta(i,j) = eta_pred(i,j) ; enddo ; enddo
 
   call cpu_clock_end(id_clock_btstep)
@@ -958,6 +1016,9 @@ subroutine step_MOM_dyn_split_RK2(u, v, h, tv, visc, Time_local, dt, forces, p_s
   if (CS%id_v_BT_accel_visc_rem > 0) &
     call post_product_v(CS%id_v_BT_accel_visc_rem, CS%v_accel_bt, CS%ADp%visc_rem_v, G, nz, CS%diag)
 
+  ! Diagnostics related to changes in eta
+  if (CS%id_deta_dt > 0) call post_data(CS%id_deta_dt, deta_dt, CS%diag)
+
   if (CS%debug) then
     call MOM_state_chksum("Corrector ", u, v, h, uh, vh, G, GV, US, symmetric=sym)
     call uvchksum("Corrector avg [uv]", u_av, v_av, G%HI, haloshift=1, symmetric=sym, scale=US%L_T_to_m_s)
@@ -972,9 +1033,10 @@ end subroutine step_MOM_dyn_split_RK2
 !> This subroutine sets up any auxiliary restart variables that are specific
 !! to the split-explicit time stepping scheme.  All variables registered here should
 !! have the ability to be recreated if they are not present in a restart file.
-subroutine register_restarts_dyn_split_RK2(HI, GV, param_file, CS, restart_CS, uh, vh)
+subroutine register_restarts_dyn_split_RK2(HI, GV, US, param_file, CS, restart_CS, uh, vh)
   type(hor_index_type),          intent(in)    :: HI         !< Horizontal index structure
   type(verticalGrid_type),       intent(in)    :: GV         !< ocean vertical grid structure
+  type(unit_scale_type),         intent(in)    :: US         !< A dimensional unit scaling type
   type(param_file_type),         intent(in)    :: param_file !< parameter file
   type(MOM_dyn_split_RK2_CS),    pointer       :: CS         !< module control structure
   type(MOM_restart_CS),          intent(inout) :: restart_CS !< MOM restart control structure
@@ -984,7 +1046,6 @@ subroutine register_restarts_dyn_split_RK2(HI, GV, param_file, CS, restart_CS, u
                          target, intent(inout) :: vh !< merid volume or mass transport [H L2 T-1 ~> m3 s-1 or kg s-1]
 
   type(vardesc)      :: vd(2)
-  character(len=40)  :: mdl = "MOM_dynamics_split_RK2" ! This module's name.
   character(len=48)  :: thickness_units, flux_units
 
   integer :: isd, ied, jsd, jed, nz, IsdB, IedB, JsdB, JedB
@@ -1016,29 +1077,32 @@ subroutine register_restarts_dyn_split_RK2(HI, GV, param_file, CS, restart_CS, u
   flux_units = get_flux_units(GV)
 
   if (GV%Boussinesq) then
-    vd(1) = var_desc("sfc",thickness_units,"Free surface Height",'h','1')
+    call register_restart_field(CS%eta, "sfc", .false., restart_CS, &
+             longname="Free surface Height", units=thickness_units, conversion=GV%H_to_mks)
   else
-    vd(1) = var_desc("p_bot",thickness_units,"Bottom Pressure",'h','1')
+    call register_restart_field(CS%eta, "p_bot", .false., restart_CS, &
+             longname="Bottom Pressure", units=thickness_units, conversion=GV%H_to_mks)
   endif
-  call register_restart_field(CS%eta, vd(1), .false., restart_CS)
 
-  vd(1) = var_desc("u2","m s-1","Auxiliary Zonal velocity",'u','L')
-  vd(2) = var_desc("v2","m s-1","Auxiliary Meridional velocity",'v','L')
-  call register_restart_pair(CS%u_av, CS%v_av, vd(1), vd(2), .false., restart_CS)
+  vd(1) = var_desc("u2", "m s-1", "Auxiliary Zonal velocity", 'u', 'L')
+  vd(2) = var_desc("v2", "m s-1", "Auxiliary Meridional velocity", 'v', 'L')
+  call register_restart_pair(CS%u_av, CS%v_av, vd(1), vd(2), .false., restart_CS, &
+                             conversion=US%L_T_to_m_s)
 
-  vd(1) = var_desc("h2",thickness_units,"Auxiliary Layer Thickness",'h','L')
-  call register_restart_field(CS%h_av, vd(1), .false., restart_CS)
+  call register_restart_field(CS%h_av, "h2", .false., restart_CS, &
+           longname="Auxiliary Layer Thickness", units=thickness_units, conversion=GV%H_to_mks)
 
-  vd(1) = var_desc("uh",flux_units,"Zonal thickness flux",'u','L')
-  vd(2) = var_desc("vh",flux_units,"Meridional thickness flux",'v','L')
-  call register_restart_pair(uh, vh, vd(1), vd(2), .false., restart_CS)
+  vd(1) = var_desc("uh", flux_units, "Zonal thickness flux", 'u', 'L')
+  vd(2) = var_desc("vh", flux_units, "Meridional thickness flux", 'v', 'L')
+  call register_restart_pair(uh, vh, vd(1), vd(2), .false., restart_CS, &
+                             conversion=GV%H_to_MKS*US%L_to_m**2*US%s_to_T)
 
-  vd(1) = var_desc("diffu","m s-2","Zonal horizontal viscous acceleration",'u','L')
-  vd(2) = var_desc("diffv","m s-2","Meridional horizontal viscous acceleration",'v','L')
-  call register_restart_pair(CS%diffu, CS%diffv, vd(1), vd(2), .false., restart_CS)
+  vd(1) = var_desc("diffu", "m s-2", "Zonal horizontal viscous acceleration", 'u', 'L')
+  vd(2) = var_desc("diffv", "m s-2", "Meridional horizontal viscous acceleration", 'v', 'L')
+  call register_restart_pair(CS%diffu, CS%diffv, vd(1), vd(2), .false., restart_CS, &
+                             conversion=US%L_T2_to_m_s2)
 
-  call register_barotropic_restarts(HI, GV, param_file, CS%barotropic_CSp, &
-                                    restart_CS)
+  call register_barotropic_restarts(HI, GV, US, param_file, CS%barotropic_CSp, restart_CS)
 
 end subroutine register_restarts_dyn_split_RK2
 
@@ -1172,6 +1236,8 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
 
   ALLOC_(CS%u_accel_bt(IsdB:IedB,jsd:jed,nz)) ; CS%u_accel_bt(:,:,:) = 0.0
   ALLOC_(CS%v_accel_bt(isd:ied,JsdB:JedB,nz)) ; CS%v_accel_bt(:,:,:) = 0.0
+  ALLOC_(CS%PFu_Stokes(IsdB:IedB,jsd:jed,nz)) ; CS%PFu_Stokes(:,:,:) = 0.0
+  ALLOC_(CS%PFv_Stokes(isd:ied,JsdB:JedB,nz)) ; CS%PFv_Stokes(:,:,:) = 0.0
 
   MIS%diffu      => CS%diffu
   MIS%diffv      => CS%diffv
@@ -1238,8 +1304,8 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
     do k=1,nz ; do j=js,je ; do i=is,ie
       CS%eta(i,j) = CS%eta(i,j) + h(i,j,k)
     enddo ; enddo ; enddo
-  elseif ((GV%m_to_H_restart /= 0.0) .and. (GV%m_to_H_restart /= GV%m_to_H)) then
-    H_rescale = GV%m_to_H / GV%m_to_H_restart
+  elseif ((GV%m_to_H_restart /= 0.0) .and. (GV%m_to_H_restart /= 1.0)) then
+    H_rescale = 1.0 / GV%m_to_H_restart
     do j=js,je ; do i=is,ie ; CS%eta(i,j) = H_rescale * CS%eta(i,j) ; enddo ; enddo
   endif
   ! Copy eta into an output array.
@@ -1251,14 +1317,12 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
 
   if (.not. query_initialized(CS%diffu,"diffu",restart_CS) .or. &
       .not. query_initialized(CS%diffv,"diffv",restart_CS)) then
-    call horizontal_viscosity(u, v, h, CS%diffu, CS%diffv, MEKE, VarMix, &
-                              G, GV, US, CS%hor_visc, &
-                              OBC=CS%OBC, BT=CS%barotropic_CSp, &
-                              TD=thickness_diffuse_CSp)
+    call horizontal_viscosity(u, v, h, CS%diffu, CS%diffv, MEKE, VarMix, G, GV, US, CS%hor_visc, &
+                              OBC=CS%OBC, BT=CS%barotropic_CSp, TD=thickness_diffuse_CSp)
   else
     if ( (US%s_to_T_restart * US%m_to_L_restart /= 0.0) .and. &
-         (US%m_to_L * US%s_to_T_restart**2 /= US%m_to_L_restart * US%s_to_T**2) ) then
-      accel_rescale = (US%m_to_L * US%s_to_T_restart**2) / (US%m_to_L_restart * US%s_to_T**2)
+         (US%s_to_T_restart**2 /= US%m_to_L_restart) ) then
+      accel_rescale = US%s_to_T_restart**2 / US%m_to_L_restart
       do k=1,nz ; do j=js,je ; do I=G%IscB,G%IecB
         CS%diffu(I,j,k) = accel_rescale * CS%diffu(I,j,k)
       enddo ; enddo ; enddo
@@ -1273,8 +1337,8 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
     do k=1,nz ; do j=jsd,jed ; do I=IsdB,IedB ; CS%u_av(I,j,k) = u(I,j,k) ; enddo ; enddo ; enddo
     do k=1,nz ; do J=JsdB,JedB ; do i=isd,ied ; CS%v_av(i,J,k) = v(i,J,k) ; enddo ; enddo ; enddo
   elseif ( (US%s_to_T_restart * US%m_to_L_restart /= 0.0) .and. &
-         ((US%m_to_L * US%s_to_T_restart) /= (US%m_to_L_restart * US%s_to_T)) ) then
-    vel_rescale = (US%m_to_L * US%s_to_T_restart) /  (US%m_to_L_restart * US%s_to_T)
+           (US%s_to_T_restart /= US%m_to_L_restart) ) then
+    vel_rescale = US%s_to_T_restart / US%m_to_L_restart
     do k=1,nz ; do j=jsd,jed ; do I=IsdB,IedB ; CS%u_av(I,j,k) = vel_rescale * CS%u_av(I,j,k) ; enddo ; enddo ; enddo
     do k=1,nz ; do J=JsdB,JedB ; do i=isd,ied ; CS%v_av(i,J,k) = vel_rescale * CS%v_av(i,J,k) ; enddo ; enddo ; enddo
   endif
@@ -1291,15 +1355,13 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
   else
     if (.not. query_initialized(CS%h_av,"h2",restart_CS)) then
       CS%h_av(:,:,:) = h(:,:,:)
-    elseif ((GV%m_to_H_restart /= 0.0) .and. (GV%m_to_H_restart /= GV%m_to_H)) then
-      H_rescale = GV%m_to_H / GV%m_to_H_restart
+    elseif ((GV%m_to_H_restart /= 0.0) .and. (GV%m_to_H_restart /= 1.0)) then
+      H_rescale = 1.0 / GV%m_to_H_restart
       do k=1,nz ; do j=js,je ; do i=is,ie ; CS%h_av(i,j,k) = H_rescale * CS%h_av(i,j,k) ; enddo ; enddo ; enddo
     endif
     if ( (GV%m_to_H_restart * US%s_to_T_restart * US%m_to_L_restart /= 0.0) .and. &
-         ((GV%m_to_H * US%m_to_L**2 * US%s_to_T_restart) /= &
-          (GV%m_to_H_restart * US%m_to_L_restart**2 * US%s_to_T)) ) then
-      uH_rescale = (GV%m_to_H * US%m_to_L**2 * US%s_to_T_restart) / &
-                   (GV%m_to_H_restart * US%m_to_L_restart**2 * US%s_to_T)
+         (US%s_to_T_restart /= (GV%m_to_H_restart * US%m_to_L_restart**2)) ) then
+      uH_rescale = US%s_to_T_restart / (GV%m_to_H_restart * US%m_to_L_restart**2)
       do k=1,nz ; do j=js,je ; do I=G%IscB,G%IecB ; uh(I,j,k) = uH_rescale * uh(I,j,k) ; enddo ; enddo ; enddo
       do k=1,nz ; do J=G%JscB,G%JecB ; do i=is,ie ; vh(i,J,k) = uH_rescale * vh(i,J,k) ; enddo ; enddo ; enddo
     endif
@@ -1313,6 +1375,7 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
   call cpu_clock_end(id_clock_pass_init)
 
   flux_units = get_flux_units(GV)
+  thickness_units = get_thickness_units(GV)
   CS%id_uh = register_diag_field('ocean_model', 'uh', diag%axesCuL, Time, &
       'Zonal Thickness Flux', flux_units, conversion=GV%H_to_MKS*US%L_to_m**2*US%s_to_T, &
       y_cell_method='sum', v_extensive=.true.)
@@ -1330,10 +1393,18 @@ subroutine initialize_dyn_split_RK2(u, v, h, uh, vh, eta, Time, G, GV, US, param
       'Meridional Pressure Force Acceleration', 'm s-2', conversion=US%L_T2_to_m_s2)
   CS%id_ueffA = register_diag_field('ocean_model', 'ueffA', diag%axesCuL, Time, &
        'Effective U-Face Area', 'm^2', conversion = GV%H_to_m*US%L_to_m, &
-       y_cell_method='sum', v_extensive = .true.)
+       y_cell_method='sum', v_extensive=.true.)
   CS%id_veffA = register_diag_field('ocean_model', 'veffA', diag%axesCvL, Time, &
        'Effective V-Face Area', 'm^2', conversion = GV%H_to_m*US%L_to_m, &
-       x_cell_method='sum', v_extensive = .true.)
+       x_cell_method='sum', v_extensive=.true.)
+  if (GV%Boussinesq) then
+    CS%id_deta_dt = register_diag_field('ocean_model', 'deta_dt', diag%axesT1, Time, &
+      'Barotropic SSH tendency due to dynamics', trim(thickness_units)//' s-1', conversion=GV%H_to_MKS*US%s_to_T)
+  else
+    CS%id_deta_dt = register_diag_field('ocean_model', 'deta_dt', diag%axesT1, Time, &
+      'Barotropic column-mass tendency due to dynamics', trim(thickness_units)//' s-1', &
+      conversion=GV%H_to_mks*US%s_to_T)
+  endif
 
   !CS%id_hf_PFu = register_diag_field('ocean_model', 'hf_PFu', diag%axesCuL, Time, &
   !    'Fractional Thickness-weighted Zonal Pressure Force Acceleration', &
