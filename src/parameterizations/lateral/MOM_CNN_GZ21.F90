@@ -14,7 +14,7 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_file_parser,           only : get_param,param_file_type
 use MOM_string_functions,      only : lowercase
 use MOM_cpu_clock,             only : cpu_clock_id, cpu_clock_begin, cpu_clock_end, CLOCK_ROUTINE
-use Forpy_interface,           only : forpy_run_python, python_interface
+!use Forpy_interface,           only : forpy_run_python, python_interface
 use SmartSim_interface,        only : smartsim_run_python, smartsim_python_interface
 use MOM_debugging,             only : hchksum_pair, uvchksum
 use MOM_error_handler,         only : MOM_error, FATAL, WARNING, is_root_pe
@@ -394,7 +394,7 @@ subroutine CNN_inference(u, v, h, diffu, diffv, G, GV, VarMix, FP_CS, SS_CS, CNN
   select case (lowercase(python_bridge_lib))
   case("forpy")
     if (python_data_collect) then
-      if (is_root_pe()) call forpy_run_python(WH_uv_glob, Sxy_glob, WH_m_glob, index_global, FP_CS)
+      ! if (is_root_pe()) call forpy_run_python(WH_uv_glob, Sxy_glob, WH_m_glob, index_global, FP_CS)
       call sync_PEs()
       do l=1,size(Sxy,1)
         call mpp_scatter(isg, ieg, jsg, jeg, nztemp, pelist, &

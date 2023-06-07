@@ -24,8 +24,8 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_verticalGrid,          only : verticalGrid_type
 use MOM_variables,             only : accel_diag_ptrs
 use MOM_string_functions,      only : lowercase
-use Forpy_interface,           only : python_interface !Cheng
-use Forpy_interface,           only : forpy_run_python_init,forpy_run_python_finalize !Cheng
+! use Forpy_interface,           only : python_interface !Cheng
+! use Forpy_interface,           only : forpy_run_python_init,forpy_run_python_finalize !Cheng
 use SmartSim_interface,        only : smartsim_python_interface !Cheng
 use SmartSim_interface,        only : smartsim_run_python_init,smartsim_run_python_finalize !Cheng
 use MOM_CNN_GZ21,              only : CNN_CS,CNN_init,CNN_inference !Cheng
@@ -185,7 +185,7 @@ type, public :: hor_visc_CS ; private
     Biharm_const2_xy, & !< Biharmonic metric-dependent constants [T L4 ~> s m4]
     Re_Ah_const_xy      !< Biharmonic metric-dependent constants [L3 ~> m3]
 
-  type(python_interface) :: python !< Python interface object !Cheng
+  type(smartsim_python_interface) :: python !< Python interface object !Cheng
   type(smartsim_python_interface) :: smartsim_python !< Python interface object !Cheng
   type(CNN_CS)           :: CNN    !< Control structure for CNN !Cheng
   logical :: use_hor_visc_python   !< If true, use a Python script to update 
@@ -2388,8 +2388,8 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   endif
 
   call get_param(param_file, mdl, "USE_HOR_VISC_PYTHON", CS%use_hor_visc_python, & !Cheng
-  "Invoke a Python script to update the lateral viscous accelerations.", &
-  default=.false.)
+  "Invoke a python script to update the lateral viscous accelerations.", &
+  default=.true.)
   call get_param(param_file, mdl, "PYTHON_DIR", CS%python_dir,&
   "The directory in which Python scripts are found.", default=".")
   CS%python_dir = slasher(CS%python_dir)
@@ -2400,7 +2400,7 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   call get_param(param_file, mdl, "PYTHON_BRIDGE_LIB", CS%python_bridge_lib, &
       "Determine which library is used for language bridge :\n" // &
       "  'forpy': Forpy library\n"// &
-      "  'smartsim': smartsim library", default='forpy')
+      "  'smartsim': smartsim library", default='smartsim')
   CS%python_bridge_lib = trim(CS%python_bridge_lib)
   call get_param(param_file, mdl, "PYTHON_DATA_COLLECT", CS%python_data_collect, & !Cheng
   "Collecting Python data to the root PE.", default=.false.)
@@ -2408,11 +2408,11 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
   if (CS%use_hor_visc_python) then !Cheng
     select case (lowercase(CS%python_bridge_lib))
     case("forpy")
-      if (CS%python_data_collect) then
-        if (is_root_pe()) call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
-      else
-        call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
-      endif
+!      if (CS%python_data_collect) then
+!        if (is_root_pe()) call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
+!      else
+!        call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
+!      endif
     case("smartsim")
       call smartsim_run_python_init(CS%smartsim_python,trim(CS%python_dir),trim(CS%python_file))
     case default
@@ -2716,11 +2716,11 @@ subroutine hor_visc_end(CS)
   if (CS%use_hor_visc_python) then
     select case (lowercase(CS%python_bridge_lib))
     case("forpy")
-      if (CS%python_data_collect) then
-        if (is_root_pe()) call forpy_run_python_finalize(CS%python)
-      else
-        call forpy_run_python_finalize(CS%python)!Cheng
-      endif
+!      if (CS%python_data_collect) then
+!        if (is_root_pe()) call forpy_run_python_finalize(CS%python)
+!      else
+!        call forpy_run_python_finalize(CS%python)!Cheng
+!      endif
     case("smartsim")
       call smartsim_run_python_finalize(CS%smartsim_python)
     case default
