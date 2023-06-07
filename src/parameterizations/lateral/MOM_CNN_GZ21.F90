@@ -13,7 +13,7 @@ use MOM_unit_scaling,          only : unit_scale_type
 use MOM_file_parser,           only : get_param,param_file_type
 use MOM_string_functions,      only : lowercase
 use MOM_cpu_clock,             only : cpu_clock_id, cpu_clock_begin, cpu_clock_end, CLOCK_ROUTINE
-use Forpy_interface,           only : forpy_run_python, python_interface
+!use Forpy_interface,           only : forpy_run_python, python_interface
 use SmartSim_interface,        only : smartsim_run_python, smartsim_python_interface
 
 
@@ -139,7 +139,7 @@ end subroutine CNN_init
 subroutine CNN_inference(u, v, h, diffu, diffv, G, GV, FP_CS, SS_CS, CNN, python_bridge_lib)
   type(ocean_grid_type),         intent(in)  :: G      !< The ocean's grid structure.
   type(verticalGrid_type),       intent(in)  :: GV     !< The ocean's vertical grid structure.
-  type(python_interface),        intent(in)  :: FP_CS  !< Forpy Python interface object
+  type(smartsim_python_interface),        intent(in)  :: FP_CS  !< Forpy Python interface object
   type(smartsim_python_interface),intent(in)  :: SS_CS  !< SmartSim Python interface object
   type(CNN_CS),                  intent(in)  :: CNN    !< Control structure for CNN
   character(len=*),              intent(in)  :: python_bridge_lib !< The library used for language bridging
@@ -219,7 +219,7 @@ subroutine CNN_inference(u, v, h, diffu, diffv, G, GV, FP_CS, SS_CS, CNN, python
   call cpu_clock_begin(CNN%id_cnn_inference)
   select case (lowercase(python_bridge_lib))
   case("forpy")
-    call forpy_run_python(WH_uv, Sxy, FP_CS, CNN%CNN_BT, G)
+ !   call forpy_run_python(WH_uv, Sxy, FP_CS, CNN%CNN_BT, G)
   case("smartsim")
     call smartsim_run_python(WH_uv, Sxy, SS_CS, CNN%CNN_BT, CNN%CNN_halo_size)
   end select
