@@ -2407,7 +2407,7 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
 !    case("forpy")
 !      call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
     case("smartsim")
-      call smartsim_run_python_init(CS%smartsim_python,trim(CS%python_dir),trim(CS%python_file))
+      call smartsim_run_python_init(CS%smartsim_python,trim(CS%python_dir),trim(CS%python_file),param_file)
     case default
       call MOM_error(FATAL, "Invalid library selected for language bridging")
     end select
