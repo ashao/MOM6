@@ -1,5 +1,6 @@
 module MOM_CNN_GZ21
 
+use MOM_database_comms,        only : dbcomms_CS_type, dbclient_type
 use MOM_grid,                  only : ocean_grid_type
 use MOM_verticalGrid,          only : verticalGrid_type
 use MOM_lateral_mixing_coeffs, only : VarMix_CS
@@ -56,6 +57,7 @@ public :: CNN_init,CNN_inference
 !> Control structure for CNN
 type, public :: CNN_CS ; private
   type(MOM_domain_type), pointer :: CNN_Domain => NULL()  !< Domain for inputs/outputs for CNN
+  type(dbclient_type),   pointer :: client => NULL() !< The database communication client
   integer :: isdw !< The lower i-memory limit for the wide halo arrays.
   integer :: iedw !< The upper i-memory limit for the wide halo arrays.
   integer :: jsdw !< The lower j-memory limit for the wide halo arrays.
@@ -84,13 +86,14 @@ end type CNN_CS
 contains
 
 !> Prepare CNN input variables with wide halos
-subroutine CNN_init(Time,G,GV,US,param_file,diag,CS)
+subroutine CNN_init(Time,G,GV,US,param_file,diag, dbcomms_CS, CS)
   type(time_type),               intent(in)    :: Time       !< The current model time.
   type(ocean_grid_type),         intent(in)    :: G     !< The ocean's grid structure.
   type(verticalGrid_type),       intent(in)    :: GV   !< The ocean's vertical grid structure
   type(unit_scale_type),         intent(in)    :: US         !< A dimensional unit scaling type
   type(param_file_type),         intent(in)    :: param_file !< Parameter file parser structure.
   type(diag_ctrl), target,       intent(inout) :: diag  !< Diagnostics structure.
+  type(dbcomms_CS_type), target, intent(in   ) :: dbcomms_CS !< Control structure for database communications
   type(CNN_CS),                  intent(inout) :: CS    !< Control structure for CNN
   ! Local Variables
   integer :: wd_halos(2) ! Varies with CNN
@@ -98,6 +101,7 @@ subroutine CNN_init(Time,G,GV,US,param_file,diag,CS)
 
   ! Register fields for output from this module.
   CS%diag => diag
+  CS%client=> dbcomms_CS%client
 
   CS%id_CNNu = register_diag_field('ocean_model', 'CNNu', diag%axesCuL, Time, &
       'Zonal Acceleration from CNN model', 'm s-2', conversion=US%L_T2_to_m_s2)
@@ -125,7 +129,7 @@ subroutine CNN_init(Time,G,GV,US,param_file,diag,CS)
       "  'sqg': vertical structure function of SQG mode", default='none')
       CS%CNN_VS = trim(CS%CNN_VS)
   call get_param(param_file, mdl, "CNN_HALO_SIZE", CS%CNN_halo_size, &
-      "Halo size at each side of subdomains, depends on CNN architecture.", & 
+      "Halo size at each side of subdomains, depends on CNN architecture.", &
       units="nondim", default=10)
 
   wd_halos(1) = CS%CNN_halo_size
@@ -455,7 +459,7 @@ subroutine CNN_inference(u, v, h, diffu, diffv, G, GV, VarMix, FP_CS, SS_CS, CNN
   ! call pass_var(Sxmean, G%Domain)
   ! call pass_var(Symean, G%Domain)
   ! call pass_var(Sxstd, G%Domain)
-  ! call pass_var(Systd, G%Domain) 
+  ! call pass_var(Systd, G%Domain)
   call create_group_pass(pass_CNN,Sx,G%Domain)
   call create_group_pass(pass_CNN,Sy,G%Domain)
   call create_group_pass(pass_CNN,Sxmean,G%Domain)
@@ -467,9 +471,9 @@ subroutine CNN_inference(u, v, h, diffu, diffv, G, GV, VarMix, FP_CS, SS_CS, CNN
   ! call hchksum_pair('SxSySTD_[SxSySTD]', Sxstd,Systd,G%HI)
   ! call hchksum_pair('SxSy_[SxSy]', Sx,Sy,G%HI)
   call cpu_clock_end(CNN%id_cnn_post2)
- 
+
   call cpu_clock_begin(CNN%id_cnn_post3)
-  fx = 0.0; fy = 0.0; 
+  fx = 0.0; fy = 0.0;
   do k=1,nz
     do j=js,je ; do I=is-1,ie
       if (CNN%CNN_VS /= 'none') then
@@ -526,7 +530,7 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
                                  intent(in) :: fy     !< Meridional acceleration due to convergence
                                                       !! of along-coordinate stress tensor [L T-2 ~> m s-2]
-  
+
   real :: KE_term(SZI_(G),SZJ_(G),SZK_(GV)) ! A term in the kinetic energy budget
                                  ! [H L2 T-3 ~> m3 s-3 or W m-2]
   real :: tmp(SZI_(G),SZJ_(G),SZK_(GV)) ! temporary array for integration
@@ -548,9 +552,9 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
-  
+
   call create_group_pass(pass_KE_uv, KE_u, KE_v, G%Domain, To_North+To_East)
-  
+
   KE_term(:,:,:) = 0.
   tmp(:,:,:) = 0.
   ! Calculate the KE source from Zanna-Bolton2020 [H L2 T-3 ~> m3 s-3].
@@ -581,5 +585,5 @@ subroutine compute_energy_source(u, v, h, fx, fy, G, GV, CS)
   call post_data(CS%id_KE_CNN, KE_term, CS%diag)
 
 end subroutine compute_energy_source
-  
+
 end module MOM_CNN_GZ21

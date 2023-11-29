@@ -4,6 +4,7 @@ module MOM_hor_visc
 ! This file is part of MOM6. See LICENSE.md for the license.
 use MOM_checksums,             only : hchksum, Bchksum, uvchksum
 use MOM_coms,                  only : min_across_PEs
+use MOM_database_comms,        only : dbcomms_CS_type
 use MOM_diag_mediator,         only : post_data, register_diag_field, safe_alloc_ptr
 use MOM_diag_mediator,         only : post_product_u, post_product_sum_u
 use MOM_diag_mediator,         only : post_product_v, post_product_sum_v
@@ -188,7 +189,7 @@ type, public :: hor_visc_CS ; private
   type(smartsim_python_interface) :: python !< Python interface object !Cheng
   type(smartsim_python_interface) :: smartsim_python !< Python interface object !Cheng
   type(CNN_CS)           :: CNN    !< Control structure for CNN !Cheng
-  logical :: use_hor_visc_python   !< If true, use a Python script to update 
+  logical :: use_hor_visc_python   !< If true, use a python script to update
                                    !! the lateral viscous accelerations.
   logical :: python_data_collect !< If true, Collecting Python data to the root PE.
   character(len=200) :: &
@@ -1695,7 +1696,7 @@ end subroutine horizontal_viscosity
 !> Allocates space for and calculates static variables used by horizontal_viscosity().
 !! hor_visc_init calculates and stores the values of a number of metric functions that
 !! are used in horizontal_viscosity().
-subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
+subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, dbcomms_CS, ADp)
   type(time_type),         intent(in)    :: Time !< Current model time.
   type(ocean_grid_type),   intent(inout) :: G    !< The ocean's grid structure.
   type(verticalGrid_type), intent(in)    :: GV   !< The ocean's vertical grid structure
@@ -1704,6 +1705,7 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
                                                  !! parameters.
   type(diag_ctrl), target, intent(inout) :: diag !< Structure to regulate diagnostic output.
   type(hor_visc_CS),       intent(inout) :: CS   !< Horizontal viscosity control struct
+  type(dbcomms_CS_type), target, intent(in) :: dbcomms_CS !< Control structure of database communication client
   type(accel_diag_ptrs), intent(in), optional :: ADp !< Acceleration diagnostics
 
   real, dimension(SZIB_(G),SZJ_(G)) :: u0u, u0v
@@ -2414,13 +2416,13 @@ subroutine hor_visc_init(Time, G, GV, US, param_file, diag, CS, ADp)
 !        call forpy_run_python_init(CS%python,trim(CS%python_dir),trim(CS%python_file))
 !      endif
     case("smartsim")
-      call smartsim_run_python_init(CS%smartsim_python,trim(CS%python_dir),trim(CS%python_file),param_file)
+      call smartsim_run_python_init(CS%smartsim_python,trim(CS%python_dir),trim(CS%python_file),param_file, dbcomms_CS)
     case default
       call MOM_error(FATAL, "Invalid library selected for language bridging")
     end select
-    call CNN_init(Time, G, GV, US, param_file, diag, CS%CNN)
+    call CNN_init(Time, G, GV, US, param_file, diag, dbcomms_CS, CS%CNN)
   endif
-  
+
 
   ! Register fields for output from this module.
   CS%id_normstress = register_diag_field('ocean_model', 'NoSt', diag%axesTL, Time, &
