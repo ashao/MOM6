@@ -57,6 +57,7 @@ use MOM_checksum_packages, only : MOM_thermo_chksum, MOM_state_chksum, MOM_accel
 use MOM_cpu_clock, only : cpu_clock_id, cpu_clock_begin, cpu_clock_end
 use MOM_cpu_clock, only : CLOCK_COMPONENT, CLOCK_SUBCOMPONENT
 use MOM_cpu_clock, only : CLOCK_MODULE_DRIVER, CLOCK_MODULE, CLOCK_ROUTINE
+use MOM_database_comms, only : dbcomms_CS_type
 use MOM_diag_mediator, only : diag_mediator_init, enable_averages
 use MOM_diag_mediator, only : disable_averaging, post_data, safe_alloc_ptr
 use MOM_diag_mediator, only : register_diag_field, register_static_field
@@ -567,7 +568,7 @@ end subroutine register_restarts_dyn_unsplit
 subroutine initialize_dyn_unsplit(u, v, h, Time, G, GV, US, param_file, diag, CS, &
                                   Accel_diag, Cont_diag, MIS, &
                                   OBC, update_OBC_CSp, ALE_CSp, set_visc, &
-                                  visc, dirs, ntrunc, cont_stencil)
+                                  visc, dirs, ntrunc, dbcomms_CS, cont_stencil)
   type(ocean_grid_type),          intent(inout) :: G          !< The ocean's grid structure.
   type(verticalGrid_type),        intent(in)    :: GV         !< The ocean's vertical grid structure.
   type(unit_scale_type),          intent(in)    :: US         !< A dimensional unit scaling type
@@ -610,6 +611,7 @@ subroutine initialize_dyn_unsplit(u, v, h, Time, G, GV, US, param_file, diag, CS
   integer, target,                intent(inout) :: ntrunc     !< A target for the variable that
                                                         !! records the number of times the velocity
                                                         !! is truncated (this should be 0).
+  type(dbcomms_CS_type),   target, intent(in)   :: dbcomms_CS !< Control stracture for database communication client
   integer,                        intent(out)   :: cont_stencil !< The stencil for thickness
                                                                 !! from the continuity solver.
 
@@ -667,7 +669,7 @@ subroutine initialize_dyn_unsplit(u, v, h, Time, G, GV, US, param_file, diag, CS
   if (use_tides) call tidal_forcing_init(Time, G, US, param_file, CS%tides_CSp)
   call PressureForce_init(Time, G, GV, US, param_file, diag, CS%PressureForce_CSp, &
                           CS%tides_CSp)
-  call hor_visc_init(Time, G, GV, US, param_file, diag, CS%hor_visc)
+  call hor_visc_init(Time, G, GV, US, param_file, diag, CS%hor_visc, dbcomms_CS)
   call vertvisc_init(MIS, Time, G, GV, US, param_file, diag, CS%ADp, dirs, &
                      ntrunc, CS%vertvisc_CSp)
   CS%set_visc_CSp => set_visc
