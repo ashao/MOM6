@@ -1688,7 +1688,7 @@ subroutine horizontal_viscosity(u, v, h, diffu, diffv, MEKE, VarMix, G, GV, US, 
     if (CS%id_diffv_visc_rem > 0) call post_product_v(CS%id_diffv_visc_rem, diffv, ADp%visc_rem_v, G, nz, CS%diag)
   endif
   
-  if (CS%use_hor_visc_python) call CNN_inference(u, v, h, diffu, diffv, G, GV, VarMix, CS%python, CS%smartsim_python, &
+  if (CS%use_hor_visc_python) call CNN_inference(u, v, h, diffu, diffv, G, GV, VarMix, CS%smartsim_python, &
                                                  CS%CNN, CS%python_bridge_lib, CS%python_data_collect) !Cheng
 
 end subroutine horizontal_viscosity
