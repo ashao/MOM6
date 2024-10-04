@@ -133,6 +133,8 @@ type, public :: MOM_dyn_unsplit_RK2_CS ; private
   integer :: id_uh = -1, id_vh = -1
   integer :: id_ueffA = -1, id_veffA = -1
   integer :: id_PFu = -1, id_PFv = -1, id_CAu = -1, id_CAv = -1
+  integer :: id_u_corrector = -1, id_v_corrector = -1
+  integer :: id_h_continuity_start = -1, id_h_continuity_after = -1
   !>@}
 
   type(diag_ctrl), pointer :: diag => NULL() !< A structure that is used to
@@ -413,6 +415,10 @@ subroutine step_MOM_dyn_unsplit_RK2(u_in, v_in, h_in, tv, visc, Time_local, dt, 
 
 ! uh = up[n] * h[n]  (up[n] might be extrapolated to damp GWs)
 ! h[n+1] = h[n] + dt div . uh
+  call enable_averages(dt,Time_local, CS%diag)
+  if (CS%id_h_continuity_start > 0) call post_data(CS%id_h_continuity_start, h_in, CS%diag)
+  call disable_averaging(CS%diag)
+
   call cpu_clock_begin(id_clock_continuity)
   call continuity(up, vp, h_in, h_in, uh, vh, dt, G, GV, US, CS%continuity_CSp, CS%OBC, pbv)
   call cpu_clock_end(id_clock_continuity)
@@ -446,6 +452,7 @@ subroutine step_MOM_dyn_unsplit_RK2(u_in, v_in, h_in, tv, visc, Time_local, dt, 
 
   if (dyn_p_surf) deallocate(p_surf)
 
+  call enable_averages(dt,Time_local, CS%diag)
 !   Here various terms used in to update the momentum equations are
 ! offered for averaging.
   if (CS%id_PFu > 0) call post_data(CS%id_PFu, CS%PFu, CS%diag)
@@ -456,6 +463,11 @@ subroutine step_MOM_dyn_unsplit_RK2(u_in, v_in, h_in, tv, visc, Time_local, dt, 
 !   Here the thickness fluxes are offered for averaging.
   if (CS%id_uh > 0) call post_data(CS%id_uh, uh, CS%diag)
   if (CS%id_vh > 0) call post_data(CS%id_vh, vh, CS%diag)
+
+  if (CS%id_u_corrector > 0) call post_data(CS%id_u_corrector, up, CS%diag)
+  if (CS%id_v_corrector > 0) call post_data(CS%id_v_corrector, vp, CS%diag)
+  if (CS%id_h_continuity_after > 0) call post_data(CS%id_h_continuity_after, h_in, CS%diag)
+
 
 ! Calculate effective areas and post data
   if (CS%id_ueffA > 0) then
@@ -473,6 +485,8 @@ subroutine step_MOM_dyn_unsplit_RK2(u_in, v_in, h_in, tv, visc, Time_local, dt, 
     enddo ; enddo ; enddo
     call post_data(CS%id_veffA, veffA, CS%diag)
   endif
+
+  call disable_averaging(CS%diag)
 
 
 end subroutine step_MOM_dyn_unsplit_RK2
@@ -575,7 +589,7 @@ subroutine initialize_dyn_unsplit_RK2(u, v, h, Time, G, GV, US, param_file, diag
 
   ! Local variables
   character(len=40) :: mdl = "MOM_dynamics_unsplit_RK2" ! This module's name.
-  character(len=48) :: flux_units
+  character(len=48) :: flux_units, thickness_units
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
   logical :: use_correct_dt_visc
@@ -684,6 +698,19 @@ subroutine initialize_dyn_unsplit_RK2(u, v, h, Time, G, GV, US, param_file, diag
   if (associated(OBC)) CS%OBC => OBC
 
   flux_units = get_flux_units(GV)
+  thickness_units = get_thickness_units(GV)
+  CS%id_u_corrector = register_diag_field('ocean_model', 'u_corrector', diag%axesCuL, Time, &
+      'Zonal velocity used in the corrector solver', flux_units, conversion=GV%H_to_MKS*US%L_to_m**2*US%s_to_T, &
+      y_cell_method='sum', v_extensive=.true.)
+  CS%id_v_corrector = register_diag_field('ocean_model', 'v_corrector', diag%axesCvL, Time, &
+      'Meridional velocity used in the corrector solver', flux_units, conversion=GV%H_to_MKS*US%L_to_m**2*US%s_to_T, &
+      x_cell_method='sum', v_extensive=.true.)
+  CS%id_h_continuity_start = register_diag_field('ocean_model', 'h_continuity_start', diag%axesTL, Time, &
+      'Layer Thickness before the continuity update', thickness_units, conversion=GV%H_to_MKS, &
+      v_extensive=.true.)
+  CS%id_h_continuity_after = register_diag_field('ocean_model', 'h_continuity_after', diag%axesTL, Time, &
+      'Layer Thickness after the continuity update', thickness_units, conversion=GV%H_to_MKS, &
+      v_extensive=.true.)
   CS%id_uh = register_diag_field('ocean_model', 'uh', diag%axesCuL, Time, &
       'Zonal Thickness Flux', flux_units, conversion=GV%H_to_MKS*US%L_to_m**2*US%s_to_T, &
       y_cell_method='sum', v_extensive=.true.)
