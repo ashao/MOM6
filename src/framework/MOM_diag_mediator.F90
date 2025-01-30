@@ -3536,47 +3536,19 @@ end subroutine
 !> Build/update vertical grids for diagnostic remapping.
 !! \note The target grids need to be updated whenever sea surface
 !! height changes.
-subroutine diag_update_remap_grids(diag_cs, alt_h, alt_T, alt_S, update_intensive, update_extensive )
+subroutine diag_update_remap_grids(diag_cs, update_intensive, update_extensive)
   type(diag_ctrl),        intent(inout) :: diag_cs      !< Diagnostics control structure
-  real, target, optional, intent(in   ) :: alt_h(:,:,:) !< Used if remapped grids should be something other than
-                                                        !! the current thicknesses [H ~> m or kg m-2]
-  real, target, optional, intent(in   ) :: alt_T(:,:,:) !< Used if remapped grids should be something other than
-                                                        !! the current temperatures [C ~> degC]
-  real, target, optional, intent(in   ) :: alt_S(:,:,:) !< Used if remapped grids should be something other than
-                                                        !! the current salinity [S ~> ppt]
   logical, optional,      intent(in   ) :: update_intensive !< If true (default), update the grids used for
                                                             !! intensive diagnostics
   logical, optional,      intent(in   ) :: update_extensive !< If true (not default), update the grids used for
                                                             !! intensive diagnostics
   ! Local variables
   integer :: m
-  real, dimension(:,:,:), pointer :: h_diag => NULL() ! The layer thickneses for diagnostics [H ~> m or kg m-2]
-  real, dimension(:,:,:), pointer :: T_diag => NULL() ! The layer temperatures for diagnostics [C ~> degC]
-  real, dimension(:,:,:), pointer :: S_diag => NULL() ! The layer salinities for diagnostics [S ~> ppt]
   real, dimension(diag_cs%G%isd:diag_cS%G%ied, diag_cs%G%jsd:diag_cS%G%jed, diag_cs%GV%ke) :: &
     dz_diag     ! Layer vertical extents for remapping [Z ~> m]
   logical :: update_intensive_local, update_extensive_local, dz_diag_needed
 
   if (diag_cs%show_call_tree) call callTree_enter("diag_update_remap_grids()")
-
-  ! Set values based on optional input arguments
-  if (present(alt_h)) then
-    h_diag => alt_h
-  else
-    h_diag => diag_cs%h
-  endif
-
-  if (present(alt_T)) then
-    T_diag => alt_T
-  else
-    T_diag => diag_CS%T
-  endif
-
-  if (present(alt_S)) then
-    S_diag => alt_S
-  else
-    S_diag => diag_CS%S
-  endif
 
   ! Defaults here are based on wanting to update intensive quantities frequently as soon as the model state changes.
   ! Conversely, for extensive quantities, in an effort to close budgets and to be consistent with the total time
@@ -3602,16 +3574,16 @@ subroutine diag_update_remap_grids(diag_cs, alt_h, alt_T, alt_S, update_intensiv
     enddo
   endif
   if (dz_diag_needed) then
-    call thickness_to_dz(h_diag, diag_cs%tv, dz_diag, diag_cs%G, diag_cs%GV, diag_cs%US, halo_size=1)
+    call thickness_to_dz(diag_cs%h, diag_cs%tv, dz_diag, diag_cs%G, diag_cs%GV, diag_cs%US, halo_size=1)
   endif
 
   if (update_intensive_local) then
     do m=1, diag_cs%num_diag_coords
       if (diag_cs%diag_remap_cs(m)%Z_based_coord) then
-        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, dz_diag, T_diag, S_diag, &
+        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, dz_diag, diag_CS%T, diag_CS%S, &
                                diag_cs%eqn_of_state, diag_cs%diag_remap_cs(m)%h)
       else
-        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, h_diag, T_diag, S_diag, &
+        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, diag_cs%h, diag_CS%T, diag_CS%S, &
                                diag_cs%eqn_of_state, diag_cs%diag_remap_cs(m)%h)
       endif
     enddo
@@ -3620,10 +3592,10 @@ subroutine diag_update_remap_grids(diag_cs, alt_h, alt_T, alt_S, update_intensiv
     diag_cs%h_begin(:,:,:) = diag_cs%h(:,:,:)
     do m=1, diag_cs%num_diag_coords
       if (diag_cs%diag_remap_cs(m)%Z_based_coord) then
-        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, dz_diag, T_diag, S_diag, &
+        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, dz_diag, diag_CS%T, diag_CS%S, &
                                diag_cs%eqn_of_state, diag_cs%diag_remap_cs(m)%h_extensive)
       else
-        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, h_diag, T_diag, S_diag, &
+        call diag_remap_update(diag_cs%diag_remap_cs(m), diag_cs%G, diag_cs%GV, diag_cs%US, diag_cs%h, diag_CS%T, diag_CS%S, &
                                diag_cs%eqn_of_state, diag_cs%diag_remap_cs(m)%h_extensive)
       endif
     enddo
